@@ -1,13 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api, TOKEN_KEY, UnauthorizedError } from './api'
-import type { MediaResult, HealthResponse, WatchStatus } from './api'
+import type { MediaResult, HealthResponse, WatchStatus, LoginResponse } from './api'
 import LoginPage from './LoginPage'
 import AddMediaModal from './AddMediaModal'
 import SettingsPage from './SettingsPage'
 import ScanPage from './ScanPage'
 
+const USER_KEY = 'pv_user'
+
 export default function App() {
   const [token, setToken] = useState<string | null>(() => sessionStorage.getItem(TOKEN_KEY))
+  const [currentUser, setCurrentUser] = useState<{ pubKey: string; role: string; name: string | null } | null>(
+    () => { try { return JSON.parse(sessionStorage.getItem(USER_KEY) ?? 'null') } catch { return null } }
+  )
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('')
@@ -20,20 +25,37 @@ export default function App() {
   const [showAddMedia, setShowAddMedia] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showScan, setShowScan] = useState(false)
+  const [inviteToken, setInviteToken] = useState<string | null>(null)
+  const [showInvite, setShowInvite] = useState(false)
 
-  function handleLogin(newToken: string, _identity?: string) {
-    sessionStorage.setItem(TOKEN_KEY, newToken)
-    setToken(newToken)
+  function handleLogin(resp: LoginResponse) {
+    sessionStorage.setItem(TOKEN_KEY, resp.token)
+    const user = { pubKey: resp.userPubKey, role: resp.userRole, name: resp.userName }
+    sessionStorage.setItem(USER_KEY, JSON.stringify(user))
+    setToken(resp.token)
+    setCurrentUser(user)
   }
 
   function handleLogout() {
     sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(USER_KEY)
     setToken(null)
+    setCurrentUser(null)
   }
 
   function handleUnauthorized() {
     sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(USER_KEY)
     setToken(null)
+    setCurrentUser(null)
+  }
+
+  async function handleCreateInvite() {
+    try {
+      const { token: t } = await api.createInvite()
+      setInviteToken(t)
+      setShowInvite(true)
+    } catch { /* ignore */ }
   }
 
   useEffect(() => {
@@ -112,6 +134,21 @@ export default function App() {
           >
             📂 Scan
           </button>
+          {currentUser?.role === 'owner' && (
+            <button
+              onClick={handleCreateInvite}
+              className="text-xs bg-gray-700 hover:bg-gray-600 rounded px-3 py-1.5"
+              title="Invite a new user"
+            >
+              + Invite
+            </button>
+          )}
+          {currentUser && (
+            <span className="text-xs text-gray-600 px-1" title={currentUser.pubKey.slice(0, 16)}>
+              {currentUser.name ?? currentUser.pubKey.slice(0, 8) + '…'}
+              {currentUser.role === 'owner' && <span className="ml-1 text-indigo-600">owner</span>}
+            </span>
+          )}
           <button
             onClick={() => setShowSettings(true)}
             className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1.5"
@@ -183,6 +220,26 @@ export default function App() {
           onAdded={search}
           onUnauthorized={handleUnauthorized}
         />
+      )}
+      {showInvite && inviteToken && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-6" onClick={() => setShowInvite(false)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6" onClick={e => e.stopPropagation()}>
+            <h2 className="text-base font-bold text-white mb-3">Invite Link</h2>
+            <p className="text-xs text-gray-400 mb-3">Share this token with the person you want to invite. It expires in 7 days and can only be used once.</p>
+            <div className="bg-gray-800 rounded-lg px-3 py-2 font-mono text-xs text-gray-200 break-all mb-4">{inviteToken}</div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { navigator.clipboard.writeText(inviteToken); }}
+                className="text-xs bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1.5"
+              >
+                Copy token
+              </button>
+              <button onClick={() => setShowInvite(false)} className="text-xs text-gray-500 hover:text-gray-300 px-3 py-1.5">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

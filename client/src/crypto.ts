@@ -36,6 +36,16 @@ function deriveAuthPrivKey(passphrase: string): Uint8Array {
 }
 
 /**
+ * Derive the compressed (33-byte) auth public key hex from a passphrase.
+ * Used during registration to send the pubkey to the server.
+ */
+export function deriveAuthPubKey(passphrase: string): string {
+  const privKey = deriveAuthPrivKey(passphrase);
+  const pubKey = secp.getPublicKey(privKey, true);
+  return toHex(pubKey);
+}
+
+/**
  * Sign a server-issued challenge nonce. Returns a compact 64-byte hex signature.
  * The passphrase is used only to derive the private key locally — it never leaves
  * the browser.

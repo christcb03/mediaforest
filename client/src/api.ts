@@ -48,6 +48,26 @@ export interface HealthResponse {
   feedLength: number;
   following: number;
   indexed: number;
+  hasOwner?: boolean;
+}
+
+export interface AuthStatusResponse {
+  hasOwner: boolean;
+}
+
+export interface LoginResponse {
+  token: string;
+  identity: string;
+  userPubKey: string;
+  userRole: 'owner' | 'member';
+  userName: string | null;
+}
+
+export interface UserRecord {
+  pubKey: string;
+  name: string | null;
+  role: 'owner' | 'member';
+  createdAt: number;
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -184,8 +204,28 @@ async function put<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+async function postPublic<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error ?? `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
 export const api = {
-  health: () => get<HealthResponse>('/health'),
+  health: () => fetch(`${BASE}/health`).then(r => r.json()) as Promise<HealthResponse>,
+  authStatus: () => fetch(`${BASE}/auth/status`).then(r => r.json()) as Promise<AuthStatusResponse>,
+  register: (pubKey: string, inviteToken?: string, name?: string) =>
+    postPublic<{ registered: boolean; serverIdentity: string; role: string }>(
+      '/auth/register', { pubKey, inviteToken, name }
+    ),
+  createInvite: () => post<{ token: string; expiresAt: number }>('/auth/invite', {}),
+  listUsers: () => get<{ users: UserRecord[] }>('/auth/users'),
   search: (params: { q?: string; kind?: string; available?: boolean; watchStatus?: string }) => {
     const qs = new URLSearchParams();
     if (params.q)           qs.set('q', params.q);

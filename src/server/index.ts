@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import staticFiles from "@fastify/static";
 import path from "path";
@@ -14,7 +14,6 @@ import { identityFromPrivKey, generatePrivKey } from "../identity/index.js";
 import {
   deriveAuthPubKey,
   createChallenge, consumeChallenge, verifyAuthSignature,
-  createSession, verifySession,
 } from "../auth/index.js";
 import { HypercoreStore } from "../store/hypercore.js";
 import { ReplicationManager } from "../replication/index.js";
@@ -38,28 +37,68 @@ const LOG_LEVEL  = process.env.MF_LOG_LEVEL   ?? "info";
 const PV_URL     = process.env.MF_PV_URL      ?? "http://localhost:8081";
 const MEDIA_DIR  = process.env.MF_MEDIA_DIR   ?? "";
 
-// ── Server key ─────────────────────────────────────────────────────────────
+// ── Server key + user registry ─────────────────────────────────────────────
+
+interface UserRecord {
+  pubKey: string;
+  name?: string;
+  role: "owner" | "member";
+  createdAt: number;
+}
 
 interface ServerKey {
   version: number;
   identityPrivKey: string;
-  authPubKey: string | null;   // registered companion auth pubkey
+  users: UserRecord[];
+  authPubKey?: string | null;  // legacy v1 field — migrated on load
 }
 
-const SERVER_KEY_PATH = path.join(DATA_DIR, "server_key.json");
+interface InviteToken {
+  token: string;
+  createdBy: string;
+  createdAt: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+const SERVER_KEY_PATH  = path.join(DATA_DIR, "server_key.json");
+const INVITES_PATH     = path.join(DATA_DIR, "invites.json");
 
 function loadOrCreateServerKey(): ServerKey {
+  let key: ServerKey;
   if (existsSync(SERVER_KEY_PATH)) {
-    return JSON.parse(readFileSync(SERVER_KEY_PATH, "utf-8")) as ServerKey;
+    key = JSON.parse(readFileSync(SERVER_KEY_PATH, "utf-8")) as ServerKey;
+  } else {
+    mkdirSync(DATA_DIR, { recursive: true });
+    key = { version: 2, identityPrivKey: generatePrivKey(), users: [] };
+    writeFileSync(SERVER_KEY_PATH, JSON.stringify(key, null, 2), { mode: 0o600 });
+    return key;
   }
-  mkdirSync(DATA_DIR, { recursive: true });
-  const key: ServerKey = { version: 1, identityPrivKey: generatePrivKey(), authPubKey: null };
-  writeFileSync(SERVER_KEY_PATH, JSON.stringify(key, null, 2), { mode: 0o600 });
+  // Migrate v1 single-user format
+  if (!key.users) {
+    key.users = [];
+    if (key.authPubKey) {
+      key.users.push({ pubKey: key.authPubKey, role: "owner", createdAt: Date.now() });
+      delete key.authPubKey;
+    }
+    key.version = 2;
+    saveServerKey(key);
+  }
   return key;
 }
 
 function saveServerKey(key: ServerKey): void {
   writeFileSync(SERVER_KEY_PATH, JSON.stringify(key, null, 2), { mode: 0o600 });
+}
+
+function loadInvites(): InviteToken[] {
+  if (!existsSync(INVITES_PATH)) return [];
+  try { return JSON.parse(readFileSync(INVITES_PATH, "utf-8")); } catch { return []; }
+}
+
+function saveInvites(invites: InviteToken[]): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(INVITES_PATH, JSON.stringify(invites, null, 2), { mode: 0o600 });
 }
 
 const serverKey = loadOrCreateServerKey();
@@ -84,19 +123,21 @@ async function connectToPV(): Promise<void> {
 
 // ── Auth state ─────────────────────────────────────────────────────────────
 
-let AUTH_PUB_KEY: Uint8Array | null = serverKey.authPubKey
-  ? Buffer.from(serverKey.authPubKey, "hex")
-  : null;
+// users map: pubKeyHex → UserRecord
+const usersMap = new Map<string, UserRecord>(serverKey.users.map(u => [u.pubKey, u]));
 
 const challenges = new Map<string, number>();
-const sessions   = new Map<string, number>();
+// sessions: token → { userPubKey, expiry }
+const sessions   = new Map<string, { userPubKey: string; expiry: number }>();
 
-const PUBLIC_ROUTES = new Set(["/health", "/auth/challenge", "/auth/verify", "/auth/register"]);
+const PUBLIC_ROUTES = new Set(["/health"]);
 const API_PREFIXES = [
   "/search", "/media", "/storage", "/crosslink", "/watchlist",
   "/follow", "/following", "/identity", "/auth", "/tmdb",
   "/pvfs", "/config", "/stream",
 ];
+// Auth sub-routes that are public (no Bearer token required)
+const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status"]);
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
@@ -125,26 +166,56 @@ await engine.refresh();
 
 // ── Fastify ────────────────────────────────────────────────────────────────
 
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function issueSession(userPubKey: string): string {
+  const now = Date.now();
+  // Prune expired
+  for (const [tok, s] of sessions) { if (s.expiry < now) sessions.delete(tok); }
+  const token = randomBytes(32).toString("hex");
+  sessions.set(token, { userPubKey, expiry: now + SESSION_TTL_MS });
+  return token;
+}
+
+function resolveSession(token: string): UserRecord | null {
+  const s = sessions.get(token);
+  if (!s || s.expiry < Date.now()) return null;
+  return usersMap.get(s.userPubKey) ?? null;
+}
+
 const app = Fastify({ logger: { level: LOG_LEVEL } });
 await app.register(cors, { origin: true });
+
+// Attach current user to every authenticated request
+app.decorateRequest("currentUser", null);
 
 // ── Auth middleware ────────────────────────────────────────────────────────
 
 app.addHook("onRequest", async (req, reply) => {
   const url = req.url.split("?")[0];
   if (PUBLIC_ROUTES.has(url)) return;
+  if (PUBLIC_AUTH_PATHS.has(url)) return;
   const isApiRoute = API_PREFIXES.some(p => url === p || url.startsWith(p + "/"));
   if (!isApiRoute) return;
-  if (!AUTH_PUB_KEY) {
-    return reply.status(401).send({ error: "server not configured: companion must POST /auth/register first" });
+  if (usersMap.size === 0) {
+    return reply.status(401).send({ error: "server not configured — register an owner first" });
   }
   const header = req.headers.authorization ?? "";
-  if (!header.startsWith("Bearer ") || !verifySession(sessions, header.slice(7))) {
+  if (!header.startsWith("Bearer ")) {
     return reply.status(401).send({ error: "unauthorized" });
   }
+  const user = resolveSession(header.slice(7));
+  if (!user) {
+    return reply.status(401).send({ error: "unauthorized" });
+  }
+  (req as FastifyRequest & { currentUser: UserRecord }).currentUser = user;
 });
 
 // ── Auth endpoints ─────────────────────────────────────────────────────────
+
+app.get("/auth/status", async () => ({
+  hasOwner: usersMap.size > 0,
+}));
 
 app.get("/auth/challenge", async () => ({
   challenge: createChallenge(challenges),
@@ -153,27 +224,92 @@ app.get("/auth/challenge", async () => ({
 app.post<{ Body: { challenge?: string; signature?: string } }>("/auth/verify", async (req, reply) => {
   const { challenge, signature } = req.body ?? {};
   if (!challenge || !signature) return reply.status(400).send({ error: "missing fields" });
-  if (!AUTH_PUB_KEY) return reply.status(401).send({ error: "server not configured: POST /auth/register first" });
+  if (usersMap.size === 0) return reply.status(401).send({ error: "server not configured — register an owner first" });
   if (!consumeChallenge(challenges, challenge)) {
     return reply.status(401).send({ error: "invalid or expired challenge" });
   }
-  if (!verifyAuthSignature(AUTH_PUB_KEY, challenge, signature)) {
-    await new Promise(r => setTimeout(r, 200));
-    return reply.status(401).send({ error: "invalid signature" });
+  // Try all registered users
+  let matchedUser: UserRecord | null = null;
+  for (const user of usersMap.values()) {
+    const pubKeyBytes = Buffer.from(user.pubKey, "hex");
+    if (verifyAuthSignature(pubKeyBytes, challenge, signature)) {
+      matchedUser = user;
+      break;
+    }
   }
-  return { token: createSession(sessions), identity: pubKeyHex };
+  if (!matchedUser) {
+    await new Promise(r => setTimeout(r, 200));
+    return reply.status(401).send({ error: "invalid passphrase" });
+  }
+  return {
+    token: issueSession(matchedUser.pubKey),
+    identity: pubKeyHex,
+    userPubKey: matchedUser.pubKey,
+    userRole: matchedUser.role,
+    userName: matchedUser.name ?? null,
+  };
 });
 
-app.post<{ Body: { pubKey?: string } }>("/auth/register", async (req, reply) => {
-  if (AUTH_PUB_KEY) return reply.status(409).send({ error: "already registered" });
-  const { pubKey } = req.body ?? {};
+app.post<{ Body: { pubKey?: string; inviteToken?: string; name?: string } }>("/auth/register", async (req, reply) => {
+  const { pubKey, inviteToken, name } = req.body ?? {};
   if (!pubKey || !/^[0-9a-f]{66}$/.test(pubKey)) {
     return reply.status(400).send({ error: "pubKey must be a 33-byte compressed secp256k1 key in hex (66 chars)" });
   }
-  serverKey.authPubKey = pubKey;
+  if (usersMap.has(pubKey)) return reply.status(409).send({ error: "this key is already registered" });
+
+  let role: "owner" | "member";
+  if (usersMap.size === 0) {
+    // First user — becomes owner, no invite needed
+    role = "owner";
+  } else {
+    // Subsequent users require a valid invite token
+    if (!inviteToken) return reply.status(403).send({ error: "invite token required" });
+    const invites = loadInvites();
+    const invite = invites.find(i => i.token === inviteToken && !i.used && i.expiresAt > Date.now());
+    if (!invite) return reply.status(403).send({ error: "invalid or expired invite token" });
+    invite.used = true;
+    saveInvites(invites);
+    role = "member";
+  }
+
+  const user: UserRecord = { pubKey, name: name?.trim() || undefined, role, createdAt: Date.now() };
+  usersMap.set(pubKey, user);
+  serverKey.users = [...usersMap.values()];
   saveServerKey(serverKey);
-  AUTH_PUB_KEY = Buffer.from(pubKey, "hex");
-  return { registered: true, serverIdentity: pubKeyHex };
+
+  return { registered: true, serverIdentity: pubKeyHex, role };
+});
+
+app.post("/auth/invite", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const invites = loadInvites();
+  // Prune expired
+  const active = invites.filter(i => !i.used && i.expiresAt > Date.now());
+  const token = randomBytes(24).toString("hex");
+  const invite: InviteToken = {
+    token,
+    createdBy: user.pubKey,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+    used: false,
+  };
+  active.push(invite);
+  saveInvites(active);
+  return { token, expiresAt: invite.expiresAt };
+});
+
+app.get("/auth/users", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  return {
+    users: [...usersMap.values()].map(u => ({
+      pubKey: u.pubKey,
+      name: u.name ?? null,
+      role: u.role,
+      createdAt: u.createdAt,
+    })),
+  };
 });
 
 // ── Health ─────────────────────────────────────────────────────────────────
@@ -185,6 +321,7 @@ app.get("/health", async () => ({
   following: followedKeys.length,
   indexed: engine.size,
   pvUrl: PV_URL,
+  hasOwner: usersMap.size > 0,
 }));
 
 // ── Identity ───────────────────────────────────────────────────────────────
@@ -200,17 +337,20 @@ app.get<{
   Querystring: { q?: string; kind?: string; available?: string; watchStatus?: string }
 }>("/search", async (req) => {
   const { q, kind, available, watchStatus } = req.query;
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
   const results = engine.search({
     query: q,
     kind: kind as never,
     availableOnly: available === "true",
     watchStatus: watchStatus as never,
+    currentUserPubKey: currentUser?.pubKey,
   });
   return { count: results.length, results: results.map(serializeResult) };
 });
 
 app.get<{ Params: { id: string } }>("/media/:id", async (req, reply) => {
-  const result = engine.getById(req.params.id);
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const result = engine.getById(req.params.id, currentUser?.pubKey);
   if (!result) return reply.status(404).send({ error: "not found" });
   return serializeResult(result);
 });
@@ -245,8 +385,10 @@ app.post<{ Body: CrosslinkPayload }>("/crosslink", async (req, reply) => {
 });
 
 app.post<{ Body: WatchlistEntryPayload }>("/watchlist", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
   const node = await createWatchlistEntryNode(privKeyHex, {
     ...req.body,
+    user_pub_key: currentUser.pubKey,
     added_at: req.body.added_at ?? Date.now(),
   });
   await ownStore.append(node);
@@ -259,13 +401,15 @@ app.patch<{
   Params: { mediaId: string };
   Body: { status?: string; progress_ms?: number };
 }>("/watchlist/:mediaId", async (req, reply) => {
-  const result = engine.getById(req.params.mediaId);
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const result = engine.getById(req.params.mediaId, currentUser.pubKey);
   if (!result) return reply.status(404).send({ error: "media not found" });
   const existing = result.watchlistEntry;
   const status = (req.body.status ?? existing?.payload.status ?? "unwatched") as import("../relay/types.js").WatchStatus;
   const node = await createWatchlistEntryNode(privKeyHex, {
     media_node_id: req.params.mediaId,
     crosslink_node_id: existing?.payload.crosslink_node_id ?? "",
+    user_pub_key: currentUser.pubKey,
     status,
     added_at: existing?.payload.added_at ?? Date.now(),
     progress_ms: req.body.progress_ms ?? existing?.payload.progress_ms,

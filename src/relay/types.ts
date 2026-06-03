@@ -64,6 +64,7 @@ export type WatchStatus = "unwatched" | "watching" | "watched" | "skipped";
 export interface WatchlistEntryPayload extends Record<string, unknown> {
   media_node_id: string;
   crosslink_node_id: string;   // which crosslink provides access
+  user_pub_key: string;        // which user owns this entry
   status: WatchStatus;
   added_at: number;
   watched_at?: number;

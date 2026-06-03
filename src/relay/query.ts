@@ -37,12 +37,15 @@ export interface SearchFilters {
   query?: string;       // matches title (case-insensitive substring)
   availableOnly?: boolean;
   watchStatus?: WatchStatus;
+  currentUserPubKey?: string;  // filter watchlist entries to this user
 }
 
 export class RelayQueryEngine {
   private feeds: Map<string, HypercoreStore> = new Map(); // feedKeyHex → store
   // Indexes rebuilt by refresh()
   private mediaIndex = new Map<string, MediaResult>();
+  // watchlist keyed by `${mediaId}:${userPubKey}` for multi-user support
+  private watchlistIndex = new Map<string, WatchlistEntryNode>();
 
   /**
    * Add a feed to query. Call refresh() after adding all feeds.
@@ -63,19 +66,23 @@ export class RelayQueryEngine {
    */
   async refresh(): Promise<void> {
     this.mediaIndex.clear();
+    this.watchlistIndex.clear();
 
     // Pass 1: collect all nodes from all feeds
     const allMedia = new Map<string, MediaNode>();
     const allPointers = new Map<string, StoragePointerNode & { feedOwner: string }>();
     const allCrosslinks = new Map<string, CrosslinkNode>();
-    const allWatchlist = new Map<string, WatchlistEntryNode>();
 
     for (const [feedOwner, store] of this.feeds) {
       for await (const node of store.list()) {
         if (isMediaNode(node))            allMedia.set(node.id, node);
         if (isStoragePointerNode(node))   allPointers.set(node.id, { ...node, feedOwner });
         if (isCrosslinkNode(node))        allCrosslinks.set(node.id, node);
-        if (isWatchlistEntryNode(node))   allWatchlist.set(node.payload.media_node_id, node);
+        if (isWatchlistEntryNode(node)) {
+          // Key by mediaId + userPubKey so multiple users' entries coexist
+          const userKey = node.payload.user_pub_key || 'legacy';
+          this.watchlistIndex.set(`${node.payload.media_node_id}:${userKey}`, node);
+        }
       }
     }
 
@@ -93,7 +100,7 @@ export class RelayQueryEngine {
       crosslinkByPointer.set(cl.payload.target_node_id, cl);
     }
 
-    // Pass 4: assemble MediaResults
+    // Pass 4: assemble MediaResults (watchlistEntry resolved per-user at query time)
     for (const [mediaId, media] of allMedia) {
       const pointers = pointersByMedia.get(mediaId) ?? [];
       const sources: MediaSource[] = pointers.map(ptr => ({
@@ -105,38 +112,49 @@ export class RelayQueryEngine {
       this.mediaIndex.set(mediaId, {
         media,
         sources,
-        watchlistEntry: allWatchlist.get(mediaId) ?? null,
+        watchlistEntry: null, // resolved per-user in search()/getById()
         bestSource: this.pickBestSource(sources),
       });
     }
+  }
+
+  private resolveWatchlist(mediaId: string, userPubKey?: string): WatchlistEntryNode | null {
+    if (!userPubKey) return null;
+    return this.watchlistIndex.get(`${mediaId}:${userPubKey}`)
+      ?? this.watchlistIndex.get(`${mediaId}:legacy`)
+      ?? null;
   }
 
   /**
    * Search across all indexed media.
    */
   search(filters: SearchFilters = {}): MediaResult[] {
-    let results = [...this.mediaIndex.values()];
+    const { currentUserPubKey, ...rest } = filters;
+    let results = [...this.mediaIndex.values()].map(r => ({
+      ...r,
+      watchlistEntry: this.resolveWatchlist(r.media.id, currentUserPubKey),
+    }));
 
-    if (filters.kind) {
-      results = results.filter(r => r.media.payload.kind === filters.kind);
+    if (rest.kind) {
+      results = results.filter(r => r.media.payload.kind === rest.kind);
     }
 
-    if (filters.query) {
-      const q = filters.query.toLowerCase();
+    if (rest.query) {
+      const q = rest.query.toLowerCase();
       results = results.filter(r =>
         r.media.payload.title.toLowerCase().includes(q)
       );
     }
 
-    if (filters.availableOnly) {
+    if (rest.availableOnly) {
       results = results.filter(r =>
         r.sources.some(s => s.storagePointer.payload.available)
       );
     }
 
-    if (filters.watchStatus) {
+    if (rest.watchStatus) {
       results = results.filter(r =>
-        r.watchlistEntry?.payload.status === filters.watchStatus
+        r.watchlistEntry?.payload.status === rest.watchStatus
       );
     }
 
@@ -152,8 +170,10 @@ export class RelayQueryEngine {
   /**
    * Look up a specific title by media node id.
    */
-  getById(mediaNodeId: string): MediaResult | null {
-    return this.mediaIndex.get(mediaNodeId) ?? null;
+  getById(mediaNodeId: string, currentUserPubKey?: string): MediaResult | null {
+    const r = this.mediaIndex.get(mediaNodeId);
+    if (!r) return null;
+    return { ...r, watchlistEntry: this.resolveWatchlist(mediaNodeId, currentUserPubKey) };
   }
 
   /**
