@@ -117,7 +117,8 @@ export default function LoginPage({ onLogin }: Props) {
 
         {(agentState === 'unavailable' || agentState === 'available') && (
           <>
-            <p className="text-sm text-gray-500 mb-6 mt-1">Enter your passphrase to continue.</p>
+            <p className="text-sm text-gray-500 mb-1 mt-1">Enter your passphrase to continue.</p>
+            <p className="text-xs text-gray-600 mb-5">This server has one owner. Use the same passphrase you registered with.</p>
             {agentState === 'unavailable' && (
               <p className="text-xs text-gray-600 mb-4">
                 Local auth agent not running — passphrase required.{' '}
