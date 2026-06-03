@@ -1,0 +1,40 @@
+services:
+  phrasevault:
+    image: ghcr.io/christcb03/phrasevault:latest
+    container_name: phrasevault
+    restart: unless-stopped
+    volumes:
+      - /opt/phrasevault/data:/data
+      - /mnt/unionfs/Media:/media:ro
+    environment:
+      PV_PORT: "8081"
+      PV_HOST: "0.0.0.0"
+      PV_DATA_DIR: /data
+      PV_LOG_LEVEL: info
+    networks:
+      - saltbox
+    labels:
+      - "traefik.enable=true"
+      - "com.github.saltbox.saltbox_managed=true"
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "traefik.http.routers.phrasevault-http.entrypoints=web"
+      - "traefik.http.routers.phrasevault-http.rule=Host(`pvtest.turnernetworking.com`)"
+      - "traefik.http.routers.phrasevault-http.middlewares=globalHeaders@file,redirect-to-https@docker,autodetect@docker,gzip@docker"
+      - "traefik.http.routers.phrasevault-http.priority=20"
+      - "traefik.http.routers.phrasevault.entrypoints=websecure"
+      - "traefik.http.routers.phrasevault.rule=Host(`pvtest.turnernetworking.com`)"
+      - "traefik.http.routers.phrasevault.middlewares=globalHeaders@file,secureHeaders@file,autodetect@docker,gzip@docker"
+      - "traefik.http.routers.phrasevault.priority=20"
+      - "traefik.http.routers.phrasevault.tls=true"
+      - "traefik.http.routers.phrasevault.tls.certresolver=cfdns"
+      - "traefik.http.services.phrasevault.loadbalancer.server.port=8081"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8081/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  saltbox:
+    external: true

@@ -1,0 +1,40 @@
+services:
+  mediaforest:
+    image: ghcr.io/christcb03/mediaforest:latest
+    container_name: mediaforest
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - /mnt/unionfs/Media:/media:ro
+    environment:
+      MF_PORT: "8080"
+      MF_HOST: "0.0.0.0"
+      MF_PV_URL: "http://phrasevault:8081"
+      MF_DATA_DIR: /data
+    networks:
+      - saltbox
+    labels:
+      - "traefik.enable=true"
+      - "com.github.saltbox.saltbox_managed=true"
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "traefik.http.routers.mediaforest-http.entrypoints=web"
+      - "traefik.http.routers.mediaforest-http.rule=Host(`mediaforest.turnernetworking.com`)"
+      - "traefik.http.routers.mediaforest-http.middlewares=globalHeaders@file,redirect-to-https@docker,autodetect@docker,gzip@docker"
+      - "traefik.http.routers.mediaforest-http.priority=20"
+      - "traefik.http.routers.mediaforest.entrypoints=websecure"
+      - "traefik.http.routers.mediaforest.rule=Host(`mediaforest.turnernetworking.com`)"
+      - "traefik.http.routers.mediaforest.middlewares=globalHeaders@file,secureHeaders@file,autodetect@docker,gzip@docker"
+      - "traefik.http.routers.mediaforest.priority=20"
+      - "traefik.http.routers.mediaforest.tls=true"
+      - "traefik.http.routers.mediaforest.tls.certresolver=cfdns"
+      - "traefik.http.services.mediaforest.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  saltbox:
+    external: true
