@@ -122,7 +122,7 @@ export default function LoginPage({ onLogin }: Props) {
               <p className="text-xs text-gray-600 mb-4">
                 Local auth agent not running — passphrase required.{' '}
                 <a
-                  href="https://github.com/anthropics/claude-code"
+                  href="https://github.com/christcb03/phrasevault#local-auth-agent"
                   className="text-indigo-500 hover:text-indigo-400"
                   target="_blank" rel="noreferrer"
                 >
