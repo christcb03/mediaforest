@@ -41,6 +41,9 @@ declare module "hypercore" {
     createReadStream(options?: ReadStreamOptions): Readable & AsyncIterable<T>;
     update(options?: { wait?: boolean }): Promise<boolean>;
     replicate(isInitiatorOrStream: boolean | Duplex, options?: Record<string, unknown>): Duplex;
+    on(event: 'append', listener: () => void): this;
+    on(event: 'close', listener: () => void): this;
+    on(event: string, listener: (...args: unknown[]) => void): this;
   }
 
   export = Hypercore;

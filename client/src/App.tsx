@@ -80,7 +80,7 @@ export default function App() {
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans">
       <header className="border-b border-gray-800 px-6 py-4 flex items-center gap-6">
         <h1 className="text-xl font-bold tracking-tight text-white">
-          <span className="text-indigo-400">⬡</span> PhraseVault
+          <span className="text-indigo-400">⬡</span> MediaForest
         </h1>
         {health && (
           <span className="text-xs text-gray-500">

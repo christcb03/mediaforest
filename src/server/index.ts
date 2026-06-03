@@ -28,7 +28,6 @@ import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync } from "../scan/scan.js";
 import { scoreCandidates } from "../scan/matcher.js";
 import { blake3 } from "@noble/hashes/blake3";
-import { createHash } from "node:crypto";
 
 // ── Config from environment ────────────────────────────────────────────────
 
@@ -109,6 +108,7 @@ await replication.shareOwnFeed(ownStore);
 
 const engine = new RelayQueryEngine();
 engine.addFeed(pubKeyHex, ownStore);
+ownStore._core.on('append', () => { engine.refresh().catch(console.error); });
 
 const FOLLOWED_PATH = path.join(DATA_DIR, "followed.json");
 const followedKeys: string[] = existsSync(FOLLOWED_PATH)
@@ -117,6 +117,7 @@ const followedKeys: string[] = existsSync(FOLLOWED_PATH)
 
 for (const key of followedKeys) {
   const store = await replication.followFeed(key);
+  store._core.on('append', () => { engine.refresh().catch(console.error); });
   engine.addFeed(key, store);
 }
 
@@ -282,6 +283,7 @@ app.post<{ Body: { feedKey: string } }>("/follow", async (req, reply) => {
   const { feedKey } = req.body;
   if (followedKeys.includes(feedKey)) return reply.status(409).send({ error: "already following" });
   const store = await replication.followFeed(feedKey);
+  store._core.on('append', () => { engine.refresh().catch(console.error); });
   engine.addFeed(feedKey, store);
   followedKeys.push(feedKey);
   writeFileSync(FOLLOWED_PATH, JSON.stringify(followedKeys));
@@ -302,6 +304,145 @@ app.delete<{ Params: { feedKey: string } }>("/follow/:feedKey", async (req) => {
 });
 
 app.get("/following", async () => ({ keys: followedKeys }));
+
+// ── Config / provider proxy (delegates to PhraseVault) ────────────────────
+
+app.get("/config/providers", async (_req, reply) => {
+  try {
+    return await pv.getProviders();
+  } catch (err) {
+    return reply.status(502).send({ error: `PhraseVault unavailable: ${err}` });
+  }
+});
+
+app.put<{
+  Params: { providerId: string };
+  Body: { read_access_token?: string; enabled?: boolean; name?: string };
+}>("/config/providers/:providerId", async (req, reply) => {
+  try {
+    return await pv.upsertProvider(req.params.providerId, req.body);
+  } catch (err) {
+    return reply.status(502).send({ error: `PhraseVault unavailable: ${err}` });
+  }
+});
+
+// ── Batch import (scan → confirm → import) ────────────────────────────────
+
+type ImportMatchSource =
+  | { source: 'tmdb'; tmdb_id: string; media_type: 'movie' | 'tv'; title: string; year: string }
+  | { source: 'manual'; title: string; year: number | null; kind: 'movie' | 'series' };
+
+interface ImportItemBody {
+  kind: 'movie' | 'series';
+  files: Array<{
+    path: string; size_bytes: number; ext: string; already_ingested?: boolean;
+    parsed: { title: string; year: number | null; kind: string; season: number | null; episode: number | null };
+  }>;
+  selected_seasons?: number[] | null;
+  match: ImportMatchSource;
+}
+
+app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (req, reply) => {
+  const { items } = req.body;
+  if (!Array.isArray(items) || items.length === 0) {
+    return reply.status(400).send({ error: "items array is required" });
+  }
+
+  const results: Array<{ mediaNodeId: string; title: string; fileCount: number }> = [];
+  const failures: Array<{ title: string; error: string }> = [];
+
+  for (const item of items) {
+    const itemTitle = item.match.title;
+    try {
+      let mediaNodeId: string;
+
+      if (item.match.source === "tmdb") {
+        const tmdbMatch = item.match;
+        // Dedup: reuse existing media node if we already have this tmdb_id
+        const existing = engine.search({}).find(r => r.media.payload.tmdb_id === tmdbMatch.tmdb_id);
+        if (existing) {
+          mediaNodeId = existing.media.id;
+        } else {
+          // Fetch full TMDB details for metadata enrichment
+          let genres: string[] | undefined;
+          let imdbId: string | undefined;
+          let tvdbId: string | undefined;
+          let runtimeMin: number | undefined;
+          try {
+            const token = await getTmdbToken();
+            if (token) {
+              const segment = tmdbMatch.media_type === "tv" ? "tv" : "movie";
+              const res = await fetch(
+                `${TMDB_BASE}/${segment}/${tmdbMatch.tmdb_id}?append_to_response=external_ids`,
+                { headers: tmdbHeaders(token) },
+              );
+              const d = await res.json() as Record<string, unknown>;
+              genres = ((d.genres as { name: string }[] | undefined) ?? []).map(g => g.name);
+              const extIds = (d.external_ids ?? {}) as Record<string, unknown>;
+              imdbId  = (d.imdb_id ?? extIds.imdb_id) as string | undefined;
+              tvdbId  = extIds.tvdb_id ? String(extIds.tvdb_id) : undefined;
+              runtimeMin = tmdbMatch.media_type === "movie"
+                ? d.runtime as number | undefined
+                : (d.episode_run_time as number[] | undefined)?.[0];
+            }
+          } catch { /* proceed without enrichment */ }
+
+          const kind = tmdbMatch.media_type === "tv" ? "series" : "movie";
+          const node = await createMediaNode(privKeyHex, {
+            title: tmdbMatch.title,
+            year: parseInt(tmdbMatch.year) || 0,
+            kind,
+            tmdb_id: tmdbMatch.tmdb_id,
+            imdb_id: imdbId,
+            tvdb_id: tvdbId,
+            genres,
+            duration_ms: runtimeMin ? runtimeMin * 60_000 : undefined,
+          });
+          await ownStore.append(node);
+          mediaNodeId = node.id;
+        }
+      } else {
+        const kind = item.kind === "series" ? "series" : "movie";
+        const node = await createMediaNode(privKeyHex, {
+          title: item.match.title,
+          year: item.match.year ?? 0,
+          kind,
+        });
+        await ownStore.append(node);
+        mediaNodeId = node.id;
+      }
+
+      // Ingest files and create storage_pointer nodes
+      let fileCount = 0;
+      for (const file of item.files) {
+        if (file.already_ingested) continue;
+        try {
+          const { fileNode } = await ingestFile(file.path, {
+            label: file.parsed.title || path.basename(file.path),
+          });
+          const storageNode = await createStoragePointerNode(privKeyHex, {
+            media_node_id: mediaNodeId,
+            endpoint_url: `/stream/${fileNode.id}`,
+            content_hash: fileNode.payload.content_hash as string,
+            size_bytes: file.size_bytes,
+            encoding: guessEncoding(file.path),
+            container: file.ext.replace(".", "") || "mkv",
+            available: true,
+          });
+          await ownStore.append(storageNode);
+          fileCount++;
+        } catch { /* individual file failure doesn't abort the item */ }
+      }
+
+      results.push({ mediaNodeId, title: itemTitle, fileCount });
+    } catch (err) {
+      failures.push({ title: itemTitle, error: err instanceof Error ? err.message : "import failed" });
+    }
+  }
+
+  await engine.refresh();
+  return reply.send({ imported: results.length, failed: failures.length, results, failures });
+});
 
 // ── TMDB proxy (reads token from PV config) ───────────────────────────────
 
@@ -587,10 +728,16 @@ app.log.info(`PhraseVault: ${PV_URL}`);
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 async function ingestFile(filePath: string, opts: { label?: string; mediaNodeId?: string } = {}) {
-  const fileBuffer = await import("fs/promises").then(fs => fs.readFile(filePath));
-  const hashBytes = createHash("sha256").update(fileBuffer).digest();
-  const blake3Hash = Buffer.from(blake3(fileBuffer)).toString("hex");
   const stats = await import("fs/promises").then(fs => fs.stat(filePath));
+  // Stream-hash so large video files don't get loaded into RAM
+  const hasher = blake3.create({});
+  await new Promise<void>((resolve, reject) => {
+    const s = createReadStream(filePath);
+    s.on('data', (chunk: Buffer | string) => hasher.update(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
+    s.on('end', resolve);
+    s.on('error', reject);
+  });
+  const blake3Hash = Buffer.from(hasher.digest()).toString("hex");
   const mime = guessMime(filePath);
 
   const fileNode = await pv.createPvfsFile({
@@ -608,6 +755,15 @@ async function ingestFile(filePath: string, opts: { label?: string; mediaNodeId?
   });
 
   return { fileNode: { ...fileNode, payload: { content_hash: blake3Hash, size_bytes: stats.size, mime_type: mime } } };
+}
+
+function guessEncoding(filePath: string): string {
+  const name = path.basename(filePath).toLowerCase();
+  if (/\b(2160p|4k|uhd)\b/.test(name)) return '4K HDR';
+  if (/\b1080p\b/.test(name)) return '1080p';
+  if (/\b720p\b/.test(name)) return '720p';
+  if (/\b480p\b/.test(name)) return '480p';
+  return '1080p';
 }
 
 function guessMime(filePath: string): string {
