@@ -3,8 +3,26 @@ import { signChallenge, deriveAuthPubKey } from './crypto'
 import { api } from './api'
 import type { LoginResponse } from './api'
 
-const AGENT_URL = 'http://localhost:8765'
 const AGENT_TIMEOUT_MS = 2000
+
+// Try localhost first; fall back to host.docker.internal for Docker-hosted browsers
+async function probeAgentUrl(): Promise<string | null> {
+  for (const base of ['http://localhost:8765', 'http://host.docker.internal:8765']) {
+    try {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), AGENT_TIMEOUT_MS)
+      const res = await fetch(`${base}/health`, { signal: ctrl.signal })
+      clearTimeout(timer)
+      if (res.ok) {
+        const { ok } = await res.json()
+        if (ok) return base
+      }
+    } catch { /* try next */ }
+  }
+  return null
+}
+
+const AGENT_URL = 'http://localhost:8765'
 
 interface Props {
   onLogin: (resp: LoginResponse) => void
@@ -25,6 +43,7 @@ export default function LoginPage({ onLogin }: Props) {
   const [agentState, setAgentState] = useState<AgentState>('probing')
   const [registerAgentState, setRegisterAgentState] = useState<RegisterAgentState>('idle')
   const [agentPubKey, setAgentPubKey] = useState<string | null>(null)
+  const [agentUrl, setAgentUrl] = useState<string>(AGENT_URL)
   const [mode, setMode] = useState<Mode>('login')
   const [hasOwner, setHasOwner] = useState<boolean | null>(null)
 
@@ -46,17 +65,13 @@ export default function LoginPage({ onLogin }: Props) {
       setRegisterAgentState('probing')
       setAgentPubKey(null)
       try {
+        const base = await probeAgentUrl()
+        if (!base) throw new Error('unavailable')
+        if (!cancelled) setAgentUrl(base)
         const ctrl = new AbortController()
         const timer = setTimeout(() => ctrl.abort(), AGENT_TIMEOUT_MS)
-        const health = await fetch(`${AGENT_URL}/health`, { signal: ctrl.signal })
+        const pkRes = await fetch(`${base}/pubkey`, { signal: ctrl.signal })
         clearTimeout(timer)
-        if (!health.ok) throw new Error('unhealthy')
-        const { ok } = await health.json()
-        if (!ok) throw new Error('not ok')
-        const ctrl2 = new AbortController()
-        const timer2 = setTimeout(() => ctrl2.abort(), AGENT_TIMEOUT_MS)
-        const pkRes = await fetch(`${AGENT_URL}/pubkey`, { signal: ctrl2.signal })
-        clearTimeout(timer2)
         if (!pkRes.ok) throw new Error('no pubkey')
         const { pubKey } = await pkRes.json()
         if (!pubKey) throw new Error('empty pubkey')
@@ -74,14 +89,11 @@ export default function LoginPage({ onLogin }: Props) {
     if (mode !== 'login' || hasOwner === false) return
     let cancelled = false
     async function tryAgent() {
+      let base: string | null
       try {
-        const ctrl = new AbortController()
-        const timer = setTimeout(() => ctrl.abort(), AGENT_TIMEOUT_MS)
-        const health = await fetch(`${AGENT_URL}/health`, { signal: ctrl.signal })
-        clearTimeout(timer)
-        if (!health.ok) throw new Error('unhealthy')
-        const { ok } = await health.json()
-        if (!ok) throw new Error('not ok')
+        base = await probeAgentUrl()
+        if (!base) throw new Error('unavailable')
+        if (!cancelled) setAgentUrl(base)
       } catch {
         if (!cancelled) setAgentState('unavailable')
         return
@@ -93,7 +105,7 @@ export default function LoginPage({ onLogin }: Props) {
         const { challenge } = await fetch(`${BASE}/auth/challenge`).then(r => r.json())
         const ctrl2 = new AbortController()
         const timer2 = setTimeout(() => ctrl2.abort(), AGENT_TIMEOUT_MS)
-        const signRes = await fetch(`${AGENT_URL}/sign`, {
+        const signRes = await fetch(`${base}/sign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ challenge }),
@@ -168,7 +180,7 @@ export default function LoginPage({ onLogin }: Props) {
       const { challenge } = await fetch(`${BASE}/auth/challenge`).then(r => r.json())
       let signature: string
       if (usingAgent) {
-        const signRes = await fetch(`${AGENT_URL}/sign`, {
+        const signRes = await fetch(`${agentUrl}/sign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ challenge }),
