@@ -394,7 +394,7 @@ app.post<{ Body: { password?: string; name?: string } }>("/auth/login-password",
   let matchedUser: UserRecord | null = null;
   for (const user of candidates) {
     try {
-      if (await argon2.verify(user.recoveryPasswordHash, password)) {
+      if (await argon2.verify(user.recoveryPasswordHash!, password)) {
         matchedUser = user;
         break;
       }
