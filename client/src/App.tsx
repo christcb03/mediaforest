@@ -7,6 +7,7 @@ import LoginPage from './LoginPage'
 import AddMediaModal from './AddMediaModal'
 import SettingsPage from './SettingsPage'
 import ScanPage from './ScanPage'
+import PlexSyncPage from './PlexSyncPage'
 
 const USER_KEY = 'pv_user'
 
@@ -25,6 +26,7 @@ export default function App() {
   const [showAddMedia, setShowAddMedia] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showScan, setShowScan] = useState(false)
+  const [showPlex, setShowPlex] = useState(false)
   const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [showInvite, setShowInvite] = useState(false)
   const [sections, setSections] = useState<SectionRecord[]>([])
@@ -120,6 +122,13 @@ export default function App() {
   if (showScan) return (
     <ScanPage onClose={() => { setShowScan(false); loadSections() }} onUnauthorized={handleUnauthorized} />
   )
+  if (showPlex) return (
+    <PlexSyncPage
+      onClose={() => { setShowPlex(false) }}
+      onUnauthorized={handleUnauthorized}
+      onImportDone={loadSections}
+    />
+  )
 
   async function handleFollow(e: React.FormEvent) {
     e.preventDefault()
@@ -168,6 +177,12 @@ export default function App() {
             className="text-xs bg-gray-700 hover:bg-gray-600 rounded px-3 py-1.5"
           >
             📂 Scan
+          </button>
+          <button
+            onClick={() => setShowPlex(true)}
+            className="text-xs bg-gray-700 hover:bg-gray-600 rounded px-3 py-1.5"
+          >
+            🟠 Plex
           </button>
           {currentUser?.role === 'owner' && (
             <button

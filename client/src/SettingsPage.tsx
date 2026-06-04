@@ -34,6 +34,13 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
   const [editLibName, setEditLibName] = useState('')
   const [editLibColor, setEditLibColor] = useState('')
 
+  // Plex state
+  const [plexUrl, setPlexUrl] = useState('')
+  const [plexToken, setPlexToken] = useState('')
+  const [plexEnabled, setPlexEnabled] = useState(false)
+  const [plexMsg, setPlexMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [plexSaving, setPlexSaving] = useState(false)
+
   // Sections state
   const [sections, setSections] = useState<SectionRecord[]>([])
   const [newSecName, setNewSecName] = useState('')
@@ -51,6 +58,11 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
         for (const p of list) {
           keys[p.provider_id] = (p.config.read_access_token as string) ?? ''
           enab[p.provider_id] = p.enabled
+          if (p.provider_id === 'plex') {
+            setPlexUrl((p.config.server_url as string) ?? '')
+            setPlexToken((p.config.token as string) ?? '')
+            setPlexEnabled(p.enabled)
+          }
         }
         setApiKeys(keys)
         setEnabled(enab)
@@ -212,6 +224,26 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
     ;[reordered[idx], reordered[idx + 1]] = [reordered[idx + 1], reordered[idx]]
     setSections(reordered)
     await api.reorderSections(reordered.map(s => s.id)).catch(() => {})
+  }
+
+  async function savePlexProvider() {
+    setPlexSaving(true)
+    setPlexMsg(null)
+    try {
+      await api.upsertProvider('plex', {
+        enabled: plexEnabled,
+        name: 'Plex Media Server',
+        server_url: plexUrl.trim(),
+        token: plexToken.trim(),
+      } as Parameters<typeof api.upsertProvider>[1])
+      setPlexMsg({ text: 'Saved.', ok: true })
+      setTimeout(() => setPlexMsg(null), 2000)
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setPlexMsg({ text: err instanceof Error ? err.message : 'Error', ok: false })
+    } finally {
+      setPlexSaving(false)
+    }
   }
 
   async function saveProvider(providerId: string) {
@@ -605,6 +637,69 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
             </div>
           </section>
         )}
+
+        {/* Plex */}
+        <section>
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+            Plex Media Server
+          </h2>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+            <p className="text-xs text-gray-500">
+              Connect your Plex server to import your library and sync watch status. After saving, use the <strong>Plex Sync</strong> button in the main toolbar.
+            </p>
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-400">Server URL</label>
+              <input
+                value={plexUrl}
+                onChange={e => setPlexUrl(e.target.value)}
+                placeholder="http://192.168.1.100:32400"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 font-mono"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-400">
+                Plex Token
+                <a
+                  href="https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/"
+                  target="_blank" rel="noreferrer"
+                  className="ml-2 text-indigo-400 hover:text-indigo-300"
+                >
+                  How to find your token →
+                </a>
+              </label>
+              <input
+                type="password"
+                value={plexToken}
+                onChange={e => setPlexToken(e.target.value)}
+                placeholder="xxxxxxxxxxxxxxxxxxxx"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 font-mono"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-400">
+                <div
+                  onClick={() => setPlexEnabled(v => !v)}
+                  className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${plexEnabled ? 'bg-indigo-600' : 'bg-gray-700'}`}
+                >
+                  <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${plexEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </div>
+                Enabled
+              </label>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={savePlexProvider}
+                disabled={plexSaving}
+                className="text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2"
+              >
+                {plexSaving ? 'Saving…' : 'Save'}
+              </button>
+              {plexMsg && (
+                <span className={`text-xs ${plexMsg.ok ? 'text-green-400' : 'text-red-400'}`}>{plexMsg.text}</span>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* Forest info */}
         <section>

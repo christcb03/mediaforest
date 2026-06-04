@@ -618,19 +618,21 @@ function getProvidersLocal(): ProviderRecord[] {
   return [...map.values()];
 }
 
-function saveProviderLocal(providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string }): ProviderRecord {
+function saveProviderLocal(providerId: string, body: Record<string, unknown>): ProviderRecord {
   if (!serverKey.providers) serverKey.providers = DEFAULT_PROVIDERS.map(p => ({ ...p }));
   const existing = serverKey.providers.find(p => p.provider_id === providerId);
+  // Pull known top-level fields; everything else goes into config
+  const { enabled, name, ...configFields } = body;
   if (existing) {
-    if (body.enabled !== undefined) existing.enabled = body.enabled;
-    if (body.name) existing.name = body.name;
-    if (body.read_access_token !== undefined) existing.config.read_access_token = body.read_access_token;
+    if (enabled !== undefined) existing.enabled = enabled as boolean;
+    if (name) existing.name = name as string;
+    Object.assign(existing.config, configFields);
   } else {
     serverKey.providers.push({
       provider_id: providerId,
-      name: body.name ?? providerId,
-      enabled: body.enabled ?? false,
-      config: body.read_access_token ? { read_access_token: body.read_access_token } : {},
+      name: (name as string) ?? providerId,
+      enabled: (enabled as boolean) ?? false,
+      config: configFields,
     });
   }
   saveServerKey(serverKey);
@@ -641,7 +643,7 @@ app.get("/config/providers", async () => getProvidersLocal());
 
 app.put<{
   Params: { providerId: string };
-  Body: { read_access_token?: string; enabled?: boolean; name?: string };
+  Body: Record<string, unknown>;
 }>("/config/providers/:providerId", async (req) => {
   const p = saveProviderLocal(req.params.providerId, req.body);
   return { provider_id: p.provider_id, enabled: p.enabled, updated: true };
@@ -964,6 +966,241 @@ app.get<{ Querystring: { id?: string; type?: string } }>("/tmdb/details", async 
     poster_path: (d.poster_path as string | null) ?? null,
     overview: (d.overview as string | null) ?? null,
   };
+});
+
+// ── Plex integration ──────────────────────────────────────────────────────
+
+import { PlexClient } from "../plex/client.js";
+
+function getPlexClient(): PlexClient | null {
+  const providers = getProvidersLocal();
+  const plex = providers.find(p => p.provider_id === "plex" && p.enabled);
+  if (!plex) return null;
+  const url = plex.config.server_url as string;
+  const token = plex.config.token as string;
+  if (!url || !token) return null;
+  return new PlexClient(url, token);
+}
+
+app.get("/plex/status", async (_req, reply) => {
+  const client = getPlexClient();
+  if (!client) return reply.status(503).send({ error: "Plex not configured — add server URL and token in Settings" });
+  try {
+    const info = await client.ping();
+    return { connected: true, version: info.version };
+  } catch (err) {
+    return reply.status(502).send({ error: err instanceof Error ? err.message : "Could not reach Plex server" });
+  }
+});
+
+app.get("/plex/libraries", async (_req, reply) => {
+  const client = getPlexClient();
+  if (!client) return reply.status(503).send({ error: "Plex not configured" });
+  try {
+    const sections = await client.getSections();
+    return { sections };
+  } catch (err) {
+    return reply.status(502).send({ error: err instanceof Error ? err.message : "Plex error" });
+  }
+});
+
+app.post<{
+  Body: { sectionKey: string; library?: string; syncWatchStatus?: boolean; tags?: string[] };
+}>("/plex/import", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const client = getPlexClient();
+  if (!client) return reply.status(503).send({ error: "Plex not configured" });
+
+  const { sectionKey, library, syncWatchStatus = true, tags } = req.body ?? {};
+  if (!sectionKey) return reply.status(400).send({ error: "sectionKey is required" });
+
+  let items;
+  try {
+    items = await client.getSectionItems(sectionKey);
+  } catch (err) {
+    return reply.status(502).send({ error: err instanceof Error ? err.message : "Plex error" });
+  }
+
+  const results: Array<{ title: string; mediaNodeId: string; action: string }> = [];
+  const failures: Array<{ title: string; error: string }> = [];
+  const tmdbToken = getTmdbToken();
+
+  for (const item of items) {
+    try {
+      // 1. Dedup: find existing media node by tmdb_id or title+year
+      let mediaNodeId: string | null = null;
+      if (item.tmdbId) {
+        const existing = engine.search({}).find(r => r.media.payload.tmdb_id === item.tmdbId);
+        if (existing) mediaNodeId = existing.media.id;
+      }
+      if (!mediaNodeId) {
+        const existing = engine.search({}).find(r =>
+          r.media.payload.title === item.title && r.media.payload.year === item.year
+        );
+        if (existing) mediaNodeId = existing.media.id;
+      }
+
+      let action = "skipped";
+
+      if (!mediaNodeId) {
+        // 2. Enrich from TMDB if we have an ID
+        let genres: string[] | undefined;
+        let imdbId = item.imdbId;
+        let tvdbId = item.tvdbId;
+        let posterPath = item.thumb;
+        let tmdbPosterPath: string | null | undefined;
+
+        if (item.tmdbId && tmdbToken) {
+          try {
+            const segment = item.type === "show" ? "tv" : "movie";
+            const res = await fetch(
+              `${TMDB_BASE}/${segment}/${item.tmdbId}?append_to_response=external_ids`,
+              { headers: tmdbHeaders(tmdbToken) },
+            );
+            const d = await res.json() as Record<string, unknown>;
+            genres = ((d.genres as { name: string }[] | undefined) ?? []).map(g => g.name);
+            const extIds = (d.external_ids ?? {}) as Record<string, unknown>;
+            if (!imdbId) imdbId = (d.imdb_id ?? extIds.imdb_id) as string | undefined;
+            if (!tvdbId) tvdbId = extIds.tvdb_id ? String(extIds.tvdb_id) : undefined;
+            tmdbPosterPath = d.poster_path as string | null;
+          } catch { /* proceed without TMDB enrichment */ }
+        }
+
+        const kind = item.type === "show" ? "series" : "movie";
+        const mediaNode = await createMediaNode(privKeyHex, {
+          title: item.title,
+          year: item.year,
+          kind,
+          tmdb_id: item.tmdbId,
+          imdb_id: imdbId,
+          tvdb_id: tvdbId,
+          genres,
+          poster_path: tmdbPosterPath ?? undefined,
+          library,
+          tags,
+        });
+        await ownStore.append(mediaNode);
+        mediaNodeId = mediaNode.id;
+        action = "imported";
+
+        // 3. Create storage pointer for Plex stream URL
+        if (item.parts.length > 0) {
+          const part = item.parts[0];
+          const streamUrl = client.directPlayUrl(part.key);
+          const storageNode = await createStoragePointerNode(privKeyHex, {
+            media_node_id: mediaNodeId,
+            endpoint_url: streamUrl,
+            content_hash: `plex:${item.ratingKey}`,
+            size_bytes: part.size,
+            encoding: "plex",
+            container: part.container,
+            available: true,
+          });
+          await ownStore.append(storageNode);
+        }
+      }
+
+      // 4. Sync watch status
+      if (syncWatchStatus && mediaNodeId) {
+        const existing = engine.getById(mediaNodeId, currentUser.pubKey);
+        let status: import("../relay/types.js").WatchStatus = "unwatched";
+        if (item.viewCount > 0) status = "watched";
+        else if (item.lastViewedAt) status = "watching";
+
+        const existingEntry = existing?.watchlistEntry;
+        if (!existingEntry || existingEntry.payload.status !== status) {
+          const wNode = await createWatchlistEntryNode(privKeyHex, {
+            media_node_id: mediaNodeId,
+            crosslink_node_id: existingEntry?.payload.crosslink_node_id ?? "",
+            user_pub_key: currentUser.pubKey,
+            status,
+            added_at: existingEntry?.payload.added_at ?? (item.addedAt * 1000),
+            size_bytes: existingEntry?.payload.size_bytes ?? (item.parts[0]?.size ?? 0),
+            ...(status === "watched" && item.lastViewedAt
+              ? { watched_at: item.lastViewedAt * 1000 }
+              : {}),
+          });
+          await ownStore.append(wNode);
+          if (action === "skipped") action = "watch-synced";
+        }
+      }
+
+      results.push({ title: item.title, mediaNodeId: mediaNodeId!, action });
+    } catch (err) {
+      failures.push({ title: item.title, error: err instanceof Error ? err.message : "import failed" });
+    }
+  }
+
+  await engine.refresh();
+  return {
+    imported: results.filter(r => r.action === "imported").length,
+    watchSynced: results.filter(r => r.action === "watch-synced").length,
+    skipped: results.filter(r => r.action === "skipped").length,
+    failed: failures.length,
+    results,
+    failures,
+  };
+});
+
+app.post("/plex/sync-watch", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const client = getPlexClient();
+  if (!client) return reply.status(503).send({ error: "Plex not configured" });
+
+  // Find all storage pointers that look like Plex direct-play URLs
+  const allResults = engine.search({ currentUserPubKey: currentUser.pubKey });
+  const plexResults = allResults.filter(r =>
+    r.sources.some(s => s.storagePointer.payload.endpoint_url.includes("/library/parts/"))
+  );
+
+  let updated = 0;
+  let skipped = 0;
+
+  for (const result of plexResults) {
+    // Extract ratingKey from content_hash (stored as "plex:{ratingKey}")
+    const plexSource = result.sources.find(s =>
+      (s.storagePointer.payload.content_hash as string).startsWith("plex:")
+    );
+    if (!plexSource) { skipped++; continue; }
+
+    const ratingKey = (plexSource.storagePointer.payload.content_hash as string).slice(5);
+
+    try {
+      // Fetch current item state from Plex
+      const data = await fetch(
+        `${client.baseUrl}/library/metadata/${ratingKey}?X-Plex-Token=${client.token}`,
+        { headers: { Accept: "application/json" } }
+      );
+      if (!data.ok) { skipped++; continue; }
+      const json = await data.json() as { MediaContainer?: { Metadata?: Array<{ viewCount?: number; lastViewedAt?: number }> } };
+      const item = json.MediaContainer?.Metadata?.[0];
+      if (!item) { skipped++; continue; }
+
+      let status: import("../relay/types.js").WatchStatus = "unwatched";
+      if ((item.viewCount ?? 0) > 0) status = "watched";
+      else if (item.lastViewedAt) status = "watching";
+
+      const existingEntry = result.watchlistEntry;
+      if (existingEntry?.payload.status === status) { skipped++; continue; }
+
+      const wNode = await createWatchlistEntryNode(privKeyHex, {
+        media_node_id: result.media.id,
+        crosslink_node_id: existingEntry?.payload.crosslink_node_id ?? "",
+        user_pub_key: currentUser.pubKey,
+        status,
+        added_at: existingEntry?.payload.added_at ?? Date.now(),
+        size_bytes: existingEntry?.payload.size_bytes ?? 0,
+        ...(status === "watched" && item.lastViewedAt
+          ? { watched_at: item.lastViewedAt * 1000 }
+          : {}),
+      });
+      await ownStore.append(wNode);
+      updated++;
+    } catch { skipped++; }
+  }
+
+  await engine.refresh();
+  return { updated, skipped };
 });
 
 // ── PVFS scan (proxied to PV forest, local file hash) ──────────────────────

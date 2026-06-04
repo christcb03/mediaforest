@@ -266,6 +266,22 @@ async function postPublic<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+export interface PlexSection {
+  key: string;
+  title: string;
+  type: 'movie' | 'show';
+  count: number;
+}
+
+export interface PlexImportResult {
+  imported: number;
+  watchSynced: number;
+  skipped: number;
+  failed: number;
+  results: Array<{ title: string; mediaNodeId: string; action: string }>;
+  failures: Array<{ title: string; error: string }>;
+}
+
 export const api = {
   health: () => fetch(`${BASE}/health`).then(r => r.json()) as Promise<HealthResponse>,
   authStatus: () => fetch(`${BASE}/auth/status`).then(r => r.json()) as Promise<AuthStatusResponse>,
@@ -306,7 +322,7 @@ export const api = {
   tmdbSearch: (q: string) => get<{ results: TmdbSearchResult[] }>(`/tmdb/search?q=${encodeURIComponent(q)}`),
   tmdbDetails: (id: string, type: 'movie' | 'tv') => get<TmdbDetails>(`/tmdb/details?id=${id}&type=${type}`),
   getProviders: () => get<ProviderConfig[]>('/config/providers'),
-  upsertProvider: (providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string }) =>
+  upsertProvider: (providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string; [key: string]: unknown }) =>
     put<{ provider_id: string; enabled: boolean; updated: boolean }>(`/config/providers/${providerId}`, body),
   pvfsScan: (body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number }) =>
     post<{ jobId: string }>('/pvfs/scan', body),
@@ -332,4 +348,10 @@ export const api = {
     patch<SectionRecord>(`/config/sections/${id}`, body),
   deleteSection: (id: string) => del<{ removed: boolean }>(`/config/sections/${id}`),
   reorderSections: (ids: string[]) => post<{ sections: SectionRecord[] }>('/config/sections/reorder', { ids }),
+  // Plex
+  plexStatus: () => get<{ connected: boolean; version: string }>('/plex/status'),
+  plexLibraries: () => get<{ sections: PlexSection[] }>('/plex/libraries'),
+  plexImport: (body: { sectionKey: string; library?: string; syncWatchStatus?: boolean; tags?: string[] }) =>
+    post<PlexImportResult>('/plex/import', body),
+  plexSyncWatch: () => post<{ updated: number; skipped: number }>('/plex/sync-watch', {}),
 };
