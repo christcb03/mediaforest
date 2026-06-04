@@ -12,6 +12,7 @@ interface Props {
 
 type AgentState = 'probing' | 'signing' | 'available' | 'unavailable'
 type Mode = 'login' | 'register'
+type RegisterAgentState = 'idle' | 'probing' | 'ready' | 'unavailable'
 
 export default function LoginPage({ onLogin }: Props) {
   const [passphrase, setPassphrase] = useState('')
@@ -20,6 +21,8 @@ export default function LoginPage({ onLogin }: Props) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [agentState, setAgentState] = useState<AgentState>('probing')
+  const [registerAgentState, setRegisterAgentState] = useState<RegisterAgentState>('idle')
+  const [agentPubKey, setAgentPubKey] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('login')
   const [hasOwner, setHasOwner] = useState<boolean | null>(null)
 
@@ -32,6 +35,45 @@ export default function LoginPage({ onLogin }: Props) {
       })
       .catch(() => setHasOwner(true)) // assume registered on error
   }, [])
+
+  // Probe companion for register mode — fetch pubkey so no passphrase needed
+  useEffect(() => {
+    if (mode !== 'register' && hasOwner !== false) return
+    if (hasOwner === null) return
+    let cancelled = false
+
+    async function probeAgentForRegister() {
+      setRegisterAgentState('probing')
+      setAgentPubKey(null)
+      try {
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), AGENT_TIMEOUT_MS)
+        const health = await fetch(`${AGENT_URL}/health`, { signal: ctrl.signal })
+        clearTimeout(timer)
+        if (!health.ok) throw new Error('unhealthy')
+        const { ok } = await health.json()
+        if (!ok) throw new Error('not ok')
+
+        const ctrl2 = new AbortController()
+        const timer2 = setTimeout(() => ctrl2.abort(), AGENT_TIMEOUT_MS)
+        const pkRes = await fetch(`${AGENT_URL}/pubkey`, { signal: ctrl2.signal })
+        clearTimeout(timer2)
+        if (!pkRes.ok) throw new Error('no pubkey')
+        const { pubKey } = await pkRes.json()
+        if (!pubKey) throw new Error('empty pubkey')
+
+        if (!cancelled) {
+          setAgentPubKey(pubKey)
+          setRegisterAgentState('ready')
+        }
+      } catch {
+        if (!cancelled) setRegisterAgentState('unavailable')
+      }
+    }
+
+    probeAgentForRegister()
+    return () => { cancelled = true }
+  }, [mode, hasOwner])
 
   // Try local agent for login mode
   useEffect(() => {
@@ -120,12 +162,28 @@ export default function LoginPage({ onLogin }: Props) {
     setError('')
     setLoading(true)
     try {
-      const pubKey = await deriveAuthPubKey(passphrase)
+      const usingAgent = registerAgentState === 'ready' && agentPubKey !== null
+      const pubKey = usingAgent ? agentPubKey! : await deriveAuthPubKey(passphrase)
       await api.register(pubKey, inviteToken || undefined, name || undefined)
+
       // Immediately log in after registering
       const BASE = import.meta.env.DEV ? '/api' : ''
       const { challenge } = await fetch(`${BASE}/auth/challenge`).then(r => r.json())
-      const signature = await signChallenge(passphrase, challenge)
+
+      let signature: string
+      if (usingAgent) {
+        const signRes = await fetch(`${AGENT_URL}/sign`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ challenge }),
+        })
+        if (!signRes.ok) throw new Error('Agent signing failed after registration.')
+        const body = await signRes.json()
+        signature = body.signature
+      } else {
+        signature = await signChallenge(passphrase, challenge)
+      }
+
       const res = await fetch(`${BASE}/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -184,6 +242,16 @@ export default function LoginPage({ onLogin }: Props) {
               </p>
             )}
 
+            {(mode === 'register' || isFirstSetup) && registerAgentState === 'probing' && (
+              <p className="text-xs text-gray-500 mt-1 mb-2">Checking for local auth agent…</p>
+            )}
+
+            {(mode === 'register' || isFirstSetup) && registerAgentState === 'ready' && (
+              <p className="text-xs text-indigo-400 mt-1 mb-2">
+                Local auth agent detected — no passphrase needed.
+              </p>
+            )}
+
             <form
               onSubmit={mode === 'register' || isFirstSetup ? handleRegister : handleLogin}
               className="flex flex-col gap-3 mt-4"
@@ -197,14 +265,16 @@ export default function LoginPage({ onLogin }: Props) {
                   className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
                 />
               )}
-              <input
-                type="password"
-                value={passphrase}
-                onChange={e => setPassphrase(e.target.value)}
-                placeholder="Passphrase"
-                autoFocus
-                className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
-              />
+              {((mode === 'register' || isFirstSetup) ? registerAgentState !== 'ready' : true) && (
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={e => setPassphrase(e.target.value)}
+                  placeholder="Passphrase"
+                  autoFocus={registerAgentState !== 'ready'}
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
+                />
+              )}
               {mode === 'register' && !isFirstSetup && (
                 <input
                   type="text"
@@ -217,7 +287,12 @@ export default function LoginPage({ onLogin }: Props) {
               {error && <p className="text-xs text-red-400">{error}</p>}
               <button
                 type="submit"
-                disabled={loading || !passphrase}
+                disabled={
+                  loading ||
+                  ((mode === 'register' || isFirstSetup)
+                    ? (registerAgentState === 'probing' || (registerAgentState !== 'ready' && !passphrase))
+                    : !passphrase)
+                }
                 className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors"
               >
                 {loading
