@@ -40,6 +40,10 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
   const [plexEnabled, setPlexEnabled] = useState(false)
   const [plexMsg, setPlexMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [plexSaving, setPlexSaving] = useState(false)
+  const [showPlexToken, setShowPlexToken] = useState(false)
+
+  // Show/hide state for recovery password fields keyed by pubKey
+  const [showRecoveryPw, setShowRecoveryPw] = useState<Record<string, boolean>>({})
 
   // Sections state
   const [sections, setSections] = useState<SectionRecord[]>([])
@@ -298,7 +302,7 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
             <div className="text-sm text-gray-500">No providers configured.</div>
           ) : (
             <div className="space-y-4">
-              {providers.map(p => (
+              {providers.filter(p => p.provider_id !== 'plex').map(p => (
                 <ProviderCard
                   key={p.provider_id}
                   provider={p}
@@ -403,13 +407,24 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                   <div className="border-t border-gray-800 pt-3 mt-1">
                       <div className="text-xs text-gray-500 mb-1.5">Set / reset recovery password</div>
                       <div className="flex gap-2">
-                        <input
-                          type="password"
-                          value={resetPw[u.pubKey] ?? ''}
-                          onChange={e => setResetPw(prev => ({ ...prev, [u.pubKey]: e.target.value }))}
-                          placeholder="New recovery password (min 8 chars)"
-                          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-indigo-500"
-                        />
+                        <div className="relative flex-1">
+                          <input
+                            type={showRecoveryPw[u.pubKey] ? 'text' : 'password'}
+                            value={resetPw[u.pubKey] ?? ''}
+                            onChange={e => setResetPw(prev => ({ ...prev, [u.pubKey]: e.target.value }))}
+                            placeholder="New recovery password (min 8 chars)"
+                            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 pr-14 text-xs focus:outline-none focus:border-indigo-500"
+                          />
+                          {resetPw[u.pubKey] && (
+                            <button
+                              type="button"
+                              onClick={() => setShowRecoveryPw(prev => ({ ...prev, [u.pubKey]: !prev[u.pubKey] }))}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-500 hover:text-gray-300 px-1 py-0.5 rounded"
+                            >
+                              {showRecoveryPw[u.pubKey] ? 'Hide' : 'Show'}
+                            </button>
+                          )}
+                        </div>
                         <button
                           onClick={() => handleResetRecovery(u.pubKey)}
                           disabled={!resetPw[u.pubKey] || (resetPw[u.pubKey]?.length ?? 0) < 8}
@@ -668,13 +683,24 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                   How to find your token →
                 </a>
               </label>
-              <input
-                type="password"
-                value={plexToken}
-                onChange={e => setPlexToken(e.target.value)}
-                placeholder="xxxxxxxxxxxxxxxxxxxx"
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 font-mono"
-              />
+              <div className="relative">
+                <input
+                  type={showPlexToken ? 'text' : 'password'}
+                  value={plexToken}
+                  onChange={e => setPlexToken(e.target.value)}
+                  placeholder="xxxxxxxxxxxxxxxxxxxx"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 pr-16 text-sm focus:outline-none focus:border-indigo-500 font-mono"
+                />
+                {plexToken && (
+                  <button
+                    type="button"
+                    onClick={() => setShowPlexToken(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-500 hover:text-gray-300 px-1.5 py-0.5 rounded"
+                  >
+                    {showPlexToken ? 'Hide' : 'Show'}
+                  </button>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-400">
