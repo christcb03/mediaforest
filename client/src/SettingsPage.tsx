@@ -400,8 +400,7 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                     )}
                   </div>
 
-                  {u.role !== 'owner' && (
-                    <div className="border-t border-gray-800 pt-3 mt-1">
+                  <div className="border-t border-gray-800 pt-3 mt-1">
                       <div className="text-xs text-gray-500 mb-1.5">Set / reset recovery password</div>
                       <div className="flex gap-2">
                         <input
@@ -420,7 +419,6 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                         </button>
                       </div>
                     </div>
-                  )}
 
                   {userMsg?.pubKey === u.pubKey && (
                     <p className={`text-xs mt-2 ${userMsg.ok ? 'text-green-400' : 'text-red-400'}`}>{userMsg.text}</p>
