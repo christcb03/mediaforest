@@ -179,7 +179,7 @@ const API_PREFIXES = [
   "/pvfs", "/config", "/stream", "/libraries", "/plex",
 ];
 // Auth sub-routes that are public (no Bearer token required)
-const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/recover", "/auth/login-password"]);
+const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/users", "/auth/recover", "/auth/login-password"]);
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
@@ -257,6 +257,10 @@ app.addHook("onRequest", async (req, reply) => {
 
 app.get("/auth/status", async () => ({
   hasOwner: usersMap.size > 0,
+}));
+
+app.get("/auth/users", async () => ({
+  users: [...usersMap.values()].map(u => ({ name: u.name ?? null, hasPassword: !!u.recoveryPasswordHash })),
 }));
 
 app.get("/auth/challenge", async () => ({
@@ -374,14 +378,21 @@ app.post<{ Body: { recoveryPassword?: string; newPubKey?: string } }>("/auth/rec
 });
 
 // Non-destructive password login: verifies recovery password hash, issues session WITHOUT rotating key
-app.post<{ Body: { password?: string } }>("/auth/login-password", async (req, reply) => {
-  const { password } = req.body ?? {};
+app.post<{ Body: { password?: string; name?: string } }>("/auth/login-password", async (req, reply) => {
+  const { password, name } = req.body ?? {};
   if (!password) return reply.status(400).send({ error: "password is required" });
   if (usersMap.size === 0) return reply.status(401).send({ error: "server not configured" });
 
+  // If a name is provided, only check users whose display name matches (case-insensitive).
+  // This prevents one user's password from logging in as a different user.
+  const candidates = [...usersMap.values()].filter(u => {
+    if (!u.recoveryPasswordHash) return false;
+    if (name) return (u.name ?? '').toLowerCase() === name.toLowerCase();
+    return true;
+  });
+
   let matchedUser: UserRecord | null = null;
-  for (const user of usersMap.values()) {
-    if (!user.recoveryPasswordHash) continue;
+  for (const user of candidates) {
     try {
       if (await argon2.verify(user.recoveryPasswordHash, password)) {
         matchedUser = user;

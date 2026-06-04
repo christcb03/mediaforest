@@ -253,6 +253,15 @@ async function put<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+async function getPublic<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error ?? `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
 async function postPublic<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
@@ -293,10 +302,12 @@ export const api = {
     postPublic<{ token: string; identity: string; userPubKey: string; userRole: 'owner' | 'member'; userName: string | null }>(
       '/auth/recover', { recoveryPassword, newPubKey }
     ),
-  loginWithPassword: (password: string) =>
+  loginWithPassword: (password: string, name?: string) =>
     postPublic<{ token: string; identity: string; userPubKey: string; userRole: 'owner' | 'member'; userName: string | null }>(
-      '/auth/login-password', { password }
+      '/auth/login-password', { password, ...(name ? { name } : {}) }
     ),
+  getLoginUsers: () =>
+    getPublic<{ users: { name: string | null; hasPassword: boolean }[] }>('/auth/users'),
   createInvite: () => post<{ token: string; expiresAt: number }>('/auth/invite', {}),
   listUsers: () => get<{ users: UserRecord[] }>('/auth/users'),
   removeUser: (pubKey: string) => del<{ removed: boolean }>(`/auth/users/${pubKey}`),

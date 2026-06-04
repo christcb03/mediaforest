@@ -46,6 +46,8 @@ export default function LoginPage({ onLogin }: Props) {
   const [agentUrl, setAgentUrl] = useState<string>(AGENT_URL)
   const [mode, setMode] = useState<Mode>('login')
   const [hasOwner, setHasOwner] = useState<boolean | null>(null)
+  const [loginUsers, setLoginUsers] = useState<{ name: string | null; hasPassword: boolean }[] | null>(null)
+  const [selectedUserName, setSelectedUserName] = useState('')
 
   useEffect(() => {
     api.authStatus()
@@ -154,12 +156,19 @@ export default function LoginPage({ onLogin }: Props) {
     }
   }
 
+  useEffect(() => {
+    if (mode !== 'password') return
+    api.getLoginUsers()
+      .then(({ users }) => setLoginUsers(users.filter(u => u.hasPassword)))
+      .catch(() => setLoginUsers([]))
+  }, [mode])
+
   async function handleLoginWithPassword(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      const resp = await api.loginWithPassword(password)
+      const resp = await api.loginWithPassword(password, selectedUserName || undefined)
       onLogin(resp)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invalid password.')
@@ -243,6 +252,18 @@ export default function LoginPage({ onLogin }: Props) {
           <>
             <p className="text-sm text-gray-400 mt-2 mb-4">Sign in with your account password.</p>
             <form onSubmit={handleLoginWithPassword} className="flex flex-col gap-3">
+              {loginUsers && loginUsers.length > 1 && (
+                <select
+                  value={selectedUserName}
+                  onChange={e => setSelectedUserName(e.target.value)}
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">Select your account…</option>
+                  {loginUsers.map((u, i) => (
+                    <option key={i} value={u.name ?? ''}>{u.name ?? '(unnamed)'}</option>
+                  ))}
+                </select>
+              )}
               <input
                 type="password"
                 value={password}
