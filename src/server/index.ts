@@ -56,6 +56,29 @@ interface ProviderRecord {
   config: Record<string, unknown>;
 }
 
+interface LibraryRecord {
+  id: string;
+  name: string;
+  color?: string;
+  defaultPath?: string;
+}
+
+interface SectionFilter {
+  library?: string;
+  genre?: string;
+  watchStatus?: string;
+  kind?: string;
+  available?: boolean;
+}
+
+interface SectionRecord {
+  id: string;
+  name: string;
+  view: "row" | "grid";
+  filter: SectionFilter;
+  sort?: "addedAt" | "year" | "title";
+}
+
 interface ServerKey {
   version: number;
   identityPrivKey: string;
@@ -63,6 +86,8 @@ interface ServerKey {
   authPubKey?: string | null;  // legacy v1 field — migrated on load
   registrationMode?: "open" | "closed";
   providers?: ProviderRecord[];
+  libraries?: LibraryRecord[];
+  sections?: SectionRecord[];
 }
 
 interface InviteToken {
@@ -150,7 +175,7 @@ const PUBLIC_ROUTES = new Set(["/health"]);
 const API_PREFIXES = [
   "/search", "/media", "/storage", "/crosslink", "/watchlist",
   "/follow", "/following", "/identity", "/auth", "/tmdb",
-  "/pvfs", "/config", "/stream",
+  "/pvfs", "/config", "/stream", "/libraries",
 ];
 // Auth sub-routes that are public (no Bearer token required)
 const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/recover"]);
@@ -458,17 +483,19 @@ app.get("/identity", async () => ({
 // ── Search ─────────────────────────────────────────────────────────────────
 
 app.get<{
-  Querystring: { q?: string; kind?: string; available?: string; watchStatus?: string }
+  Querystring: { q?: string; kind?: string; available?: string; watchStatus?: string; library?: string; genre?: string }
 }>("/search", async (req) => {
-  const { q, kind, available, watchStatus } = req.query;
+  const { q, kind, available, watchStatus, library, genre } = req.query;
   const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
-  const results = engine.search({
+  let results = engine.search({
     query: q,
     kind: kind as never,
     availableOnly: available === "true",
     watchStatus: watchStatus as never,
     currentUserPubKey: currentUser?.pubKey,
   });
+  if (library) results = results.filter(r => r.media.payload.library === library);
+  if (genre) results = results.filter(r => (r.media.payload.genres as string[] | undefined)?.some(g => g.toLowerCase() === genre.toLowerCase()));
   return { count: results.length, results: results.map(serializeResult) };
 });
 
@@ -620,6 +647,143 @@ app.put<{
   return { provider_id: p.provider_id, enabled: p.enabled, updated: true };
 });
 
+// ── Libraries ─────────────────────────────────────────────────────────────
+
+function getLibraries(): LibraryRecord[] {
+  return serverKey.libraries ?? [];
+}
+
+function defaultSectionsForLibraries(libs: LibraryRecord[]): SectionRecord[] {
+  const sections: SectionRecord[] = [
+    { id: "recently-added", name: "Recently Added", view: "row", filter: {}, sort: "addedAt" },
+    { id: "continue", name: "Continue Watching", view: "row", filter: { watchStatus: "watching" }, sort: "addedAt" },
+  ];
+  for (const lib of libs) {
+    sections.push({ id: `lib-${lib.id}`, name: lib.name, view: "grid", filter: { library: lib.id }, sort: "title" });
+  }
+  return sections;
+}
+
+app.get("/libraries", async () => ({ libraries: getLibraries() }));
+
+app.post<{ Body: { name?: string; color?: string; defaultPath?: string } }>("/libraries", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const { name, color, defaultPath } = req.body ?? {};
+  if (!name?.trim()) return reply.status(400).send({ error: "name is required" });
+  const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if ((serverKey.libraries ?? []).find(l => l.id === id)) {
+    return reply.status(409).send({ error: "a library with that name already exists" });
+  }
+  const lib: LibraryRecord = { id, name: name.trim(), color, defaultPath };
+  serverKey.libraries = [...(serverKey.libraries ?? []), lib];
+  // Auto-create a section for this library
+  if (!serverKey.sections) serverKey.sections = defaultSectionsForLibraries([]);
+  if (!serverKey.sections.find(s => s.filter.library === id)) {
+    serverKey.sections.push({ id: `lib-${id}`, name: lib.name, view: "grid", filter: { library: id }, sort: "title" });
+  }
+  saveServerKey(serverKey);
+  reply.status(201);
+  return lib;
+});
+
+app.patch<{ Params: { id: string }; Body: { name?: string; color?: string; defaultPath?: string } }>(
+  "/libraries/:id",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+    const lib = (serverKey.libraries ?? []).find(l => l.id === req.params.id);
+    if (!lib) return reply.status(404).send({ error: "library not found" });
+    if (req.body.name) lib.name = req.body.name.trim();
+    if (req.body.color !== undefined) lib.color = req.body.color;
+    if (req.body.defaultPath !== undefined) lib.defaultPath = req.body.defaultPath;
+    saveServerKey(serverKey);
+    return lib;
+  },
+);
+
+app.delete<{ Params: { id: string } }>("/libraries/:id", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const idx = (serverKey.libraries ?? []).findIndex(l => l.id === req.params.id);
+  if (idx === -1) return reply.status(404).send({ error: "library not found" });
+  serverKey.libraries!.splice(idx, 1);
+  saveServerKey(serverKey);
+  return { removed: true };
+});
+
+// ── Sections ──────────────────────────────────────────────────────────────
+
+function getSections(): SectionRecord[] {
+  if (!serverKey.sections || serverKey.sections.length === 0) {
+    return defaultSectionsForLibraries(serverKey.libraries ?? []);
+  }
+  return serverKey.sections;
+}
+
+app.get("/config/sections", async () => ({ sections: getSections() }));
+
+app.post<{ Body: { name?: string; view?: string; filter?: SectionFilter; sort?: string } }>(
+  "/config/sections",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+    const { name, view = "grid", filter = {}, sort = "addedAt" } = req.body ?? {};
+    if (!name?.trim()) return reply.status(400).send({ error: "name is required" });
+    const id = `section-${randomBytes(8).toString("hex")}`;
+    const section: SectionRecord = { id, name: name.trim(), view: (view === "row" ? "row" : "grid"), filter, sort: sort as SectionRecord["sort"] };
+    serverKey.sections = [...getSections(), section];
+    saveServerKey(serverKey);
+    reply.status(201);
+    return section;
+  },
+);
+
+app.patch<{ Params: { id: string }; Body: { name?: string; view?: string; filter?: SectionFilter; sort?: string } }>(
+  "/config/sections/:id",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+    const sections = getSections();
+    const s = sections.find(s => s.id === req.params.id);
+    if (!s) return reply.status(404).send({ error: "section not found" });
+    if (req.body.name) s.name = req.body.name.trim();
+    if (req.body.view) s.view = req.body.view === "row" ? "row" : "grid";
+    if (req.body.filter) s.filter = req.body.filter;
+    if (req.body.sort) s.sort = req.body.sort as SectionRecord["sort"];
+    serverKey.sections = sections;
+    saveServerKey(serverKey);
+    return s;
+  },
+);
+
+app.delete<{ Params: { id: string } }>("/config/sections/:id", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const sections = getSections();
+  const idx = sections.findIndex(s => s.id === req.params.id);
+  if (idx === -1) return reply.status(404).send({ error: "section not found" });
+  sections.splice(idx, 1);
+  serverKey.sections = sections;
+  saveServerKey(serverKey);
+  return { removed: true };
+});
+
+app.post<{ Body: { ids: string[] } }>("/config/sections/reorder", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const { ids } = req.body ?? {};
+  if (!Array.isArray(ids)) return reply.status(400).send({ error: "ids array required" });
+  const sections = getSections();
+  const map = new Map(sections.map(s => [s.id, s]));
+  const reordered = ids.map(id => map.get(id)).filter(Boolean) as SectionRecord[];
+  // Append any sections not mentioned in ids at the end
+  for (const s of sections) { if (!ids.includes(s.id)) reordered.push(s); }
+  serverKey.sections = reordered;
+  saveServerKey(serverKey);
+  return { sections: reordered };
+});
+
 // ── Batch import (scan → confirm → import) ────────────────────────────────
 
 type ImportMatchSource =
@@ -634,6 +798,8 @@ interface ImportItemBody {
   }>;
   selected_seasons?: number[] | null;
   match: ImportMatchSource;
+  library?: string;
+  tags?: string[];
 }
 
 app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (req, reply) => {
@@ -692,6 +858,8 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
             genres,
             duration_ms: runtimeMin ? runtimeMin * 60_000 : undefined,
             poster_path: tmdbMatch.poster_path ?? undefined,
+            library: item.library,
+            tags: item.tags,
           });
           await ownStore.append(node);
           mediaNodeId = node.id;
@@ -702,6 +870,8 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
           title: item.match.title,
           year: item.match.year ?? 0,
           kind,
+          library: item.library,
+          tags: item.tags,
         });
         await ownStore.append(node);
         mediaNodeId = node.id;
@@ -1082,6 +1252,8 @@ function serializeResult(r: import("../relay/query.js").MediaResult) {
     genres: r.media.payload.genres,
     imdb_id: r.media.payload.imdb_id,
     poster_path: r.media.payload.poster_path as string | undefined,
+    library: r.media.payload.library as string | undefined,
+    tags: r.media.payload.tags as string[] | undefined,
     sources: r.sources.map(s => ({
       storageNodeId: s.storagePointer.id,
       endpointUrl: s.storagePointer.payload.endpoint_url,

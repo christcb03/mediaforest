@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api, UnauthorizedError } from './api'
-import type { ProviderConfig, UserRecord, AuthConfig } from './api'
+import type { ProviderConfig, UserRecord, AuthConfig, LibraryRecord, SectionRecord, SectionFilter } from './api'
 
 interface Props {
   onClose: () => void
@@ -24,6 +24,23 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
   const [configMsg, setConfigMsg] = useState<string | null>(null)
   const [inviteMsg, setInviteMsg] = useState<string | null>(null)
   const isOwner = userRole === 'owner'
+
+  // Libraries state
+  const [libraries, setLibraries] = useState<LibraryRecord[]>([])
+  const [newLibName, setNewLibName] = useState('')
+  const [newLibColor, setNewLibColor] = useState('#6366f1')
+  const [libMsg, setLibMsg] = useState<string | null>(null)
+  const [editingLib, setEditingLib] = useState<string | null>(null)
+  const [editLibName, setEditLibName] = useState('')
+  const [editLibColor, setEditLibColor] = useState('')
+
+  // Sections state
+  const [sections, setSections] = useState<SectionRecord[]>([])
+  const [newSecName, setNewSecName] = useState('')
+  const [newSecView, setNewSecView] = useState<'row' | 'grid'>('row')
+  const [newSecFilter, setNewSecFilter] = useState<SectionFilter>({})
+  const [newSecSort, setNewSecSort] = useState<string>('')
+  const [secMsg, setSecMsg] = useState<string | null>(null)
 
   useEffect(() => {
     api.getProviders()
@@ -49,6 +66,12 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
       .catch(err => { if (err instanceof UnauthorizedError) onUnauthorized() })
     api.getAuthConfig()
       .then(setAuthConfig)
+      .catch(() => {})
+    api.getLibraries()
+      .then(r => setLibraries(r.libraries))
+      .catch(() => {})
+    api.getSections()
+      .then(r => setSections(r.sections))
       .catch(() => {})
   }, [isOwner])
 
@@ -100,6 +123,95 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
       if (err instanceof UnauthorizedError) { onUnauthorized(); return }
       setInviteMsg('Error creating invite.')
     }
+  }
+
+  async function handleCreateLibrary() {
+    if (!newLibName.trim()) return
+    setLibMsg(null)
+    try {
+      const lib = await api.createLibrary({ name: newLibName.trim(), color: newLibColor })
+      setLibraries(prev => [...prev, lib])
+      setNewLibName('')
+      setNewLibColor('#6366f1')
+      setLibMsg('Library created.')
+      setTimeout(() => setLibMsg(null), 2000)
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setLibMsg(err instanceof Error ? err.message : 'Error')
+    }
+  }
+
+  async function handleSaveLib(id: string) {
+    setLibMsg(null)
+    try {
+      const updated = await api.updateLibrary(id, { name: editLibName, color: editLibColor })
+      setLibraries(prev => prev.map(l => l.id === id ? updated : l))
+      setEditingLib(null)
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setLibMsg(err instanceof Error ? err.message : 'Error')
+    }
+  }
+
+  async function handleDeleteLibrary(id: string) {
+    setLibMsg(null)
+    try {
+      await api.deleteLibrary(id)
+      setLibraries(prev => prev.filter(l => l.id !== id))
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setLibMsg(err instanceof Error ? err.message : 'Error')
+    }
+  }
+
+  async function handleCreateSection() {
+    if (!newSecName.trim()) return
+    setSecMsg(null)
+    try {
+      const sec = await api.createSection({
+        name: newSecName.trim(),
+        view: newSecView,
+        filter: newSecFilter,
+        sort: newSecSort || undefined,
+      })
+      setSections(prev => [...prev, sec])
+      setNewSecName('')
+      setNewSecView('row')
+      setNewSecFilter({})
+      setNewSecSort('')
+      setSecMsg('Section created.')
+      setTimeout(() => setSecMsg(null), 2000)
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setSecMsg(err instanceof Error ? err.message : 'Error')
+    }
+  }
+
+  async function handleDeleteSection(id: string) {
+    setSecMsg(null)
+    try {
+      await api.deleteSection(id)
+      setSections(prev => prev.filter(s => s.id !== id))
+    } catch (err) {
+      if (err instanceof UnauthorizedError) { onUnauthorized(); return }
+      setSecMsg(err instanceof Error ? err.message : 'Error')
+    }
+  }
+
+  async function handleMoveSectionUp(idx: number) {
+    if (idx === 0) return
+    const reordered = [...sections]
+    ;[reordered[idx - 1], reordered[idx]] = [reordered[idx], reordered[idx - 1]]
+    setSections(reordered)
+    await api.reorderSections(reordered.map(s => s.id)).catch(() => {})
+  }
+
+  async function handleMoveSectionDown(idx: number) {
+    if (idx === sections.length - 1) return
+    const reordered = [...sections]
+    ;[reordered[idx], reordered[idx + 1]] = [reordered[idx + 1], reordered[idx]]
+    setSections(reordered)
+    await api.reorderSections(reordered.map(s => s.id)).catch(() => {})
   }
 
   async function saveProvider(providerId: string) {
@@ -281,6 +393,215 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
               {users.length === 0 && (
                 <div className="text-sm text-gray-500">No users registered.</div>
               )}
+            </div>
+          </section>
+        )}
+
+        {/* Owner: Libraries */}
+        {isOwner && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+              Libraries
+            </h2>
+            <div className="space-y-2 mb-4">
+              {libraries.map(lib => (
+                <div key={lib.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                  {editingLib === lib.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={editLibName}
+                        onChange={e => setEditLibName(e.target.value)}
+                        className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                      />
+                      <input
+                        type="color"
+                        value={editLibColor}
+                        onChange={e => setEditLibColor(e.target.value)}
+                        className="w-8 h-8 rounded cursor-pointer bg-transparent border-0"
+                        title="Library color"
+                      />
+                      <button onClick={() => handleSaveLib(lib.id)} className="text-xs bg-indigo-600 hover:bg-indigo-500 rounded-lg px-3 py-1.5">Save</button>
+                      <button onClick={() => setEditingLib(null)} className="text-xs text-gray-500 hover:text-gray-300 px-2 py-1.5">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: lib.color ?? '#6366f1' }} />
+                        <span className="text-sm text-white">{lib.name}</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setEditingLib(lib.id); setEditLibName(lib.name); setEditLibColor(lib.color ?? '#6366f1') }}
+                          className="text-xs text-gray-500 hover:text-gray-300 px-2 py-1"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeleteLibrary(lib.id)}
+                          className="text-xs text-red-500 hover:text-red-400 px-2 py-1"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {libraries.length === 0 && (
+                <div className="text-sm text-gray-500">No libraries yet.</div>
+              )}
+            </div>
+
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <div className="text-xs text-gray-400 mb-3 font-medium">New Library</div>
+              <div className="flex gap-2">
+                <input
+                  value={newLibName}
+                  onChange={e => setNewLibName(e.target.value)}
+                  placeholder="Library name (e.g. Movies, TV Shows)"
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                  onKeyDown={e => e.key === 'Enter' && handleCreateLibrary()}
+                />
+                <input
+                  type="color"
+                  value={newLibColor}
+                  onChange={e => setNewLibColor(e.target.value)}
+                  className="w-8 h-8 rounded cursor-pointer bg-transparent border-0"
+                  title="Library color"
+                />
+                <button
+                  onClick={handleCreateLibrary}
+                  disabled={!newLibName.trim()}
+                  className="text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 rounded-lg px-3 py-1.5 shrink-0"
+                >
+                  Create
+                </button>
+              </div>
+              {libMsg && <p className="text-xs mt-2 text-green-400">{libMsg}</p>}
+            </div>
+          </section>
+        )}
+
+        {/* Owner: Sections */}
+        {isOwner && (
+          <section>
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+              Home Sections
+            </h2>
+            <p className="text-xs text-gray-500 mb-4">
+              Sections appear on the home page in order. Each section filters by library, genre, kind, or watch status. Row view shows a horizontal scroll strip; grid view shows a poster grid.
+            </p>
+
+            <div className="space-y-2 mb-4">
+              {sections.map((sec, idx) => (
+                <div key={sec.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center gap-3">
+                  <div className="flex flex-col gap-1 shrink-0">
+                    <button onClick={() => handleMoveSectionUp(idx)} disabled={idx === 0} className="text-xs text-gray-600 hover:text-gray-300 disabled:opacity-30">▲</button>
+                    <button onClick={() => handleMoveSectionDown(idx)} disabled={idx === sections.length - 1} className="text-xs text-gray-600 hover:text-gray-300 disabled:opacity-30">▼</button>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-white truncate">{sec.name}</span>
+                      <span className="text-xs bg-gray-800 text-gray-400 rounded px-1.5 py-0.5">{sec.view}</span>
+                    </div>
+                    <div className="text-xs text-gray-600 mt-0.5">
+                      {[
+                        sec.filter.library && `library: ${sec.filter.library}`,
+                        sec.filter.genre && `genre: ${sec.filter.genre}`,
+                        sec.filter.kind && `kind: ${sec.filter.kind}`,
+                        sec.filter.watchStatus && `status: ${sec.filter.watchStatus}`,
+                        sec.filter.available && 'available only',
+                      ].filter(Boolean).join(' · ') || 'No filters (shows all)'}
+                    </div>
+                  </div>
+                  <button onClick={() => handleDeleteSection(sec.id)} className="text-xs text-red-500 hover:text-red-400 shrink-0">Delete</button>
+                </div>
+              ))}
+              {sections.length === 0 && (
+                <div className="text-sm text-gray-500">No sections yet. Create one below.</div>
+              )}
+            </div>
+
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+              <div className="text-xs text-gray-400 font-medium">New Section</div>
+              <div className="flex gap-2">
+                <input
+                  value={newSecName}
+                  onChange={e => setNewSecName(e.target.value)}
+                  placeholder="Section title (e.g. Movies, Continue Watching)"
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                />
+                <select
+                  value={newSecView}
+                  onChange={e => setNewSecView(e.target.value as 'row' | 'grid')}
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="row">Row</option>
+                  <option value="grid">Grid</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Library filter</label>
+                  <select
+                    value={newSecFilter.library ?? ''}
+                    onChange={e => setNewSecFilter(f => ({ ...f, library: e.target.value || undefined }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Any library</option>
+                    {libraries.map(l => <option key={l.id} value={l.name}>{l.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Kind filter</label>
+                  <select
+                    value={newSecFilter.kind ?? ''}
+                    onChange={e => setNewSecFilter(f => ({ ...f, kind: e.target.value || undefined }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Any kind</option>
+                    <option value="movie">Movies</option>
+                    <option value="series">Series</option>
+                    <option value="episode">Episodes</option>
+                    <option value="short">Shorts</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Watch status filter</label>
+                  <select
+                    value={newSecFilter.watchStatus ?? ''}
+                    onChange={e => setNewSecFilter(f => ({ ...f, watchStatus: e.target.value || undefined }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Any status</option>
+                    <option value="unwatched">Unwatched</option>
+                    <option value="watching">Watching</option>
+                    <option value="watched">Watched</option>
+                    <option value="skipped">Skipped</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Sort</label>
+                  <select
+                    value={newSecSort}
+                    onChange={e => setNewSecSort(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Default</option>
+                    <option value="title">Title A–Z</option>
+                    <option value="year">Year (newest first)</option>
+                    <option value="addedAt">Recently added</option>
+                  </select>
+                </div>
+              </div>
+              <button
+                onClick={handleCreateSection}
+                disabled={!newSecName.trim()}
+                className="text-xs bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 rounded-lg px-4 py-2"
+              >
+                Add Section
+              </button>
+              {secMsg && <p className="text-xs text-green-400">{secMsg}</p>}
             </div>
           </section>
         )}

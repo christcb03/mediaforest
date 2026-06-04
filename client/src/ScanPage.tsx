@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { api, UnauthorizedError } from './api'
-import type { ScannedFile, MatchCandidate, MatchSource, ImportItem } from './api'
+import type { ScannedFile, MatchCandidate, MatchSource, ImportItem, LibraryRecord } from './api'
 
 interface Props {
   onClose: () => void
@@ -78,6 +78,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [matchError, setMatchError] = useState('')
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
 
+  // Library selection
+  const [libraries, setLibraries] = useState<LibraryRecord[]>([])
+  const [selectedLibrary, setSelectedLibrary] = useState<string>('')
+  const [showUncertainOnly, setShowUncertainOnly] = useState(false)
+
   // Show/movie selection: key = title, value = selected season numbers (null = all, empty Set = none)
   const [selectedShows, setSelectedShows] = useState<Map<string, Set<number> | null>>(new Map())
   const [selectedMovies, setSelectedMovies] = useState<Set<string>>(new Set())
@@ -106,6 +111,32 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     scanFiles.filter(f => f.parsed.kind === 'movie'),
     [scanFiles],
   )
+
+  // Uncertain-only filter: shows/movies with unconfirmed low-confidence matches
+  const visibleShows = useMemo(() => {
+    if (!showUncertainOnly) return shows
+    return shows.filter(s => {
+      const ms = matchStates.get(`${s.title}::series`) ?? matchStates.get(`${s.title}::unknown`)
+      return ms?.needsReview && !ms.confirmed
+    })
+  }, [shows, matchStates, showUncertainOnly])
+
+  const visibleMovies = useMemo(() => {
+    if (!showUncertainOnly) return movies
+    return movies.filter(f => {
+      const ms = matchStates.get(`${f.parsed.title}::movie`) ?? matchStates.get(`${f.parsed.title}::unknown`)
+      return ms?.needsReview && !ms.confirmed
+    })
+  }, [movies, matchStates, showUncertainOnly])
+
+  useEffect(() => {
+    api.getLibraries()
+      .then(r => {
+        setLibraries(r.libraries)
+        if (r.libraries.length > 0 && !selectedLibrary) setSelectedLibrary(r.libraries[0].id)
+      })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
@@ -420,7 +451,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       for (const [sn, eps] of group.seasons) {
         if (!selectedSeasons || selectedSeasons.includes(sn)) files.push(...eps)
       }
-      items.push({ kind: 'series', files, selected_seasons: selectedSeasons, match: matchSrc })
+      items.push({ kind: 'series', files, selected_seasons: selectedSeasons, match: matchSrc, library: selectedLibrary || undefined })
     }
 
     // Movies
@@ -429,7 +460,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       if (!f) continue
       const ms = matchStates.get(`${f.parsed.title}::movie`) ?? matchStates.get(`${f.parsed.title}::unknown`)
       const matchSrc = buildMatchSource(ms, f.parsed.title, 'movie')
-      items.push({ kind: 'movie', files: [f], match: matchSrc })
+      items.push({ kind: 'movie', files: [f], match: matchSrc, library: selectedLibrary || undefined })
     }
 
     try {
@@ -509,6 +540,20 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             disabled={phase !== 'idle' && phase !== 'ready'}
             className="w-24 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
           />
+          {libraries.length > 0 && (
+            <select
+              value={selectedLibrary}
+              onChange={e => setSelectedLibrary(e.target.value)}
+              disabled={phase === 'importing'}
+              title="Target library"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+            >
+              <option value="">No library</option>
+              {libraries.map(l => (
+                <option key={l.id} value={l.id}>{l.name}</option>
+              ))}
+            </select>
+          )}
           <button
             onClick={handleScan}
             disabled={phase === 'scanning' || phase === 'importing'}
@@ -516,6 +561,19 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           >
             {phase === 'scanning' ? 'Scanning…' : 'Scan'}
           </button>
+          {(phase === 'ready' || (phase === 'scanning' && scanFiles.length > 0)) && (
+            <button
+              onClick={() => setShowUncertainOnly(v => !v)}
+              className={`text-sm rounded-lg px-4 py-2.5 font-medium transition-colors ${
+                showUncertainOnly
+                  ? 'bg-yellow-700 hover:bg-yellow-600 text-yellow-100'
+                  : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              }`}
+              title="Show only uncertain matches"
+            >
+              {showUncertainOnly ? `Uncertain (${unconfirmedNeedsReview})` : 'All matches'}
+            </button>
+          )}
           {phase === 'ready' && selectedCount > 0 && (
             <button
               onClick={handleImport}
@@ -581,13 +639,15 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         {(phase === 'ready' || (phase === 'scanning' && scanFiles.length > 0)) && (
           <div className="space-y-8">
             {/* TV Shows */}
-            {shows.length > 0 && (
+            {visibleShows.length > 0 && (
               <section>
                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
-                  TV Shows ({shows.filter(s => !s.alreadyImported).length} new)
+                  TV Shows
+                  {!showUncertainOnly && <> ({shows.filter(s => !s.alreadyImported).length} new)</>}
+                  {showUncertainOnly && <> — uncertain matches only</>}
                 </h2>
                 <div className="space-y-3">
-                  {shows.map(show => (
+                  {visibleShows.map(show => (
                     <ShowCard
                       key={show.title}
                       show={show}
@@ -616,13 +676,15 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             )}
 
             {/* Movies */}
-            {movies.length > 0 && (
+            {visibleMovies.length > 0 && (
               <section>
                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
-                  Movies ({movies.filter(m => !m.already_ingested).length} new)
+                  Movies
+                  {!showUncertainOnly && <> ({movies.filter(m => !m.already_ingested).length} new)</>}
+                  {showUncertainOnly && <> — uncertain matches only</>}
                 </h2>
                 <div className="space-y-1">
-                  {movies.map((movie, i) => (
+                  {visibleMovies.map((movie, i) => (
                     <MovieRow
                       key={i}
                       file={movie}
@@ -646,6 +708,12 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                   ))}
                 </div>
               </section>
+            )}
+
+            {showUncertainOnly && visibleShows.length === 0 && visibleMovies.length === 0 && (
+              <div className="text-center text-gray-500 py-12 text-sm">
+                All matches confirmed — nothing needs review.
+              </div>
             )}
           </div>
         )}

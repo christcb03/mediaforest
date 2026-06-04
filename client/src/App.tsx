@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api, BASE, TOKEN_KEY, UnauthorizedError } from './api'
-import type { MediaResult, HealthResponse, WatchStatus, LoginResponse } from './api'
+import type { MediaResult, HealthResponse, WatchStatus, LoginResponse, SectionRecord } from './api'
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w92'
 import LoginPage from './LoginPage'
@@ -17,8 +17,6 @@ export default function App() {
   )
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [query, setQuery] = useState('')
-  const [kind, setKind] = useState('')
-  const [availableOnly, setAvailableOnly] = useState(false)
   const [results, setResults] = useState<MediaResult[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<MediaResult | null>(null)
@@ -29,6 +27,8 @@ export default function App() {
   const [showScan, setShowScan] = useState(false)
   const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [showInvite, setShowInvite] = useState(false)
+  const [sections, setSections] = useState<SectionRecord[]>([])
+  const [sectionResults, setSectionResults] = useState<Map<string, MediaResult[]>>(new Map())
 
   function handleLogin(resp: LoginResponse) {
     sessionStorage.setItem(TOKEN_KEY, resp.token)
@@ -65,27 +65,60 @@ export default function App() {
     api.health().then(setHealth).catch(() => {})
   }, [token])
 
-  const search = useCallback(async () => {
+  // Load section config
+  useEffect(() => {
     if (!token) return
+    api.getSections()
+      .then(r => setSections(r.sections))
+      .catch(() => {})
+  }, [token])
+
+  // Full-text search (only when query is non-empty — collapses all sections)
+  const search = useCallback(async () => {
+    if (!token || !query) { setResults([]); return }
     setLoading(true)
     try {
-      const res = await api.search({ q: query || undefined, kind: kind || undefined, available: availableOnly || undefined })
+      const res = await api.search({ q: query })
       setResults(res.results)
     } catch (err) {
       if (err instanceof UnauthorizedError) handleUnauthorized()
     } finally {
       setLoading(false)
     }
-  }, [token, query, kind, availableOnly])
+  }, [token, query])
 
   useEffect(() => { search() }, [search])
+
+  // Load each section's results
+  const loadSections = useCallback(async () => {
+    if (!token || sections.length === 0) return
+    const map = new Map<string, MediaResult[]>()
+    await Promise.all(sections.map(async s => {
+      try {
+        const params: Parameters<typeof api.search>[0] = {}
+        if (s.filter.library) params.library = s.filter.library
+        if (s.filter.genre) params.genre = s.filter.genre
+        if (s.filter.watchStatus) params.watchStatus = s.filter.watchStatus
+        if (s.filter.kind) params.kind = s.filter.kind
+        if (s.filter.available) params.available = true
+        const res = await api.search(params)
+        let items = res.results
+        if (s.sort === 'title') items = [...items].sort((a, b) => a.title.localeCompare(b.title))
+        else if (s.sort === 'year') items = [...items].sort((a, b) => b.year - a.year)
+        map.set(s.id, items)
+      } catch { map.set(s.id, []) }
+    }))
+    setSectionResults(map)
+  }, [token, sections])
+
+  useEffect(() => { loadSections() }, [loadSections])
 
   if (!token) return <LoginPage onLogin={handleLogin} />
   if (showSettings) return (
     <SettingsPage onClose={() => setShowSettings(false)} onUnauthorized={handleUnauthorized} userRole={currentUser?.role as 'owner' | 'member' | undefined} />
   )
   if (showScan) return (
-    <ScanPage onClose={() => setShowScan(false)} onUnauthorized={handleUnauthorized} />
+    <ScanPage onClose={() => { setShowScan(false); loadSections() }} onUnauthorized={handleUnauthorized} />
   )
 
   async function handleFollow(e: React.FormEvent) {
@@ -164,62 +197,79 @@ export default function App() {
         </div>
       </header>
 
-      <div className="max-w-5xl mx-auto px-6 py-8">
-        <div className="flex gap-3 mb-6">
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search your library…"
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
-          />
-          <select
-            value={kind}
-            onChange={e => setKind(e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none"
-          >
-            <option value="">All types</option>
-            <option value="movie">Movies</option>
-            <option value="series">Series</option>
-            <option value="episode">Episodes</option>
-          </select>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={availableOnly}
-              onChange={e => setAvailableOnly(e.target.checked)}
-              className="accent-indigo-500"
-            />
-            Available only
-          </label>
-        </div>
-
-        {loading ? (
-          <div className="text-center text-gray-500 py-16">Loading…</div>
-        ) : results.length === 0 ? (
-          <div className="text-center text-gray-600 py-16">
-            No titles yet. Follow a friend or add media to get started.
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-3">
-            {results.map(r => (
-              <MediaCard key={r.id} result={r} onSelect={setSelected} />
-            ))}
-          </div>
-        )}
+      {/* Search bar — always visible, collapses sections when active */}
+      <div className="border-b border-gray-800 px-6 py-3">
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search your library…"
+          className="w-full max-w-lg bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500"
+        />
       </div>
+
+      {query ? (
+        /* Search results: flat list */
+        <div className="max-w-5xl mx-auto px-6 py-6">
+          {loading ? (
+            <div className="text-center text-gray-500 py-16">Searching…</div>
+          ) : results.length === 0 ? (
+            <div className="text-center text-gray-600 py-16">No results for "{query}"</div>
+          ) : (
+            <div className="grid grid-cols-1 gap-2">
+              {results.map(r => (
+                <MediaCard key={r.id} result={r} onSelect={setSelected} />
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Section view */
+        <div className="py-6 space-y-8">
+          {sections.length === 0 ? (
+            <div className="text-center text-gray-600 py-16 px-6">
+              No libraries yet. Use <strong>📂 Scan</strong> to import media, or go to Settings to create libraries.
+            </div>
+          ) : (() => {
+            const rendered = sections
+              .map(section => {
+                const items = sectionResults.get(section.id) ?? []
+                if (items.length === 0) return null
+                return (
+                  <LibrarySection
+                    key={section.id}
+                    section={section}
+                    items={items}
+                    onSelect={setSelected}
+                  />
+                )
+              })
+              .filter(Boolean)
+            if (rendered.length === 0) {
+              return (
+                <div className="text-center text-gray-600 py-16 px-6">
+                  {sectionResults.size === 0
+                    ? 'Loading…'
+                    : 'No media yet. Use 📂 Scan to import.'}
+                </div>
+              )
+            }
+            return rendered
+          })()}
+        </div>
+      )}
 
       {selected && (
         <DetailPanel
           result={selected}
           onClose={() => setSelected(null)}
           onUnauthorized={handleUnauthorized}
-          onWatchlistChange={search}
+          onWatchlistChange={loadSections}
         />
       )}
       {showAddMedia && (
         <AddMediaModal
           onClose={() => setShowAddMedia(false)}
-          onAdded={search}
+          onAdded={() => { search(); loadSections() }}
           onUnauthorized={handleUnauthorized}
         />
       )}
@@ -285,6 +335,75 @@ function MediaCard({ result, onSelect }: { result: MediaResult; onSelect: (r: Me
           {result.sources.length} source{result.sources.length !== 1 ? 's' : ''}
         </span>
       </div>
+    </button>
+  )
+}
+
+function LibrarySection({ section, items, onSelect }: {
+  section: SectionRecord
+  items: MediaResult[]
+  onSelect: (r: MediaResult) => void
+}) {
+  if (items.length === 0) return null
+  return (
+    <div>
+      <div className="px-6 mb-3 flex items-baseline gap-3">
+        <h2 className="text-base font-bold text-white">{section.name}</h2>
+        <span className="text-xs text-gray-600">{items.length} title{items.length !== 1 ? 's' : ''}</span>
+      </div>
+      {section.view === 'row' ? (
+        <div className="flex gap-3 overflow-x-auto px-6 pb-2 scrollbar-thin">
+          {items.map(r => (
+            <PosterCard key={r.id} result={r} onSelect={onSelect} />
+          ))}
+        </div>
+      ) : (
+        <div className="px-6 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {items.map(r => (
+            <PosterCard key={r.id} result={r} onSelect={onSelect} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const TMDB_IMG_W154 = 'https://image.tmdb.org/t/p/w154'
+
+function PosterCard({ result, onSelect }: { result: MediaResult; onSelect: (r: MediaResult) => void }) {
+  const available = result.sources.some(s => s.available)
+  return (
+    <button
+      onClick={() => onSelect(result)}
+      className="flex-shrink-0 w-28 group text-left"
+    >
+      <div className="relative rounded-lg overflow-hidden bg-gray-800 aspect-[2/3] mb-1.5">
+        {result.poster_path ? (
+          <img
+            src={`${TMDB_IMG_W154}${result.poster_path}`}
+            alt=""
+            className="w-full h-full object-cover group-hover:opacity-80 transition-opacity"
+            loading="lazy"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs text-center px-2">
+            {result.title}
+          </div>
+        )}
+        {!available && (
+          <div className="absolute inset-0 bg-black/50 flex items-end p-1">
+            <span className="text-[10px] text-gray-400">Offline</span>
+          </div>
+        )}
+        {result.watchlist?.status === 'watched' && (
+          <div className="absolute top-1 right-1 w-4 h-4 bg-green-700 rounded-full flex items-center justify-center text-[10px]">✓</div>
+        )}
+        {result.watchlist?.status === 'watching' && (
+          <div className="absolute top-1 right-1 w-4 h-4 bg-yellow-700 rounded-full flex items-center justify-center text-[10px]">▶</div>
+        )}
+      </div>
+      <div className="text-xs text-gray-300 truncate leading-tight">{result.title}</div>
+      <div className="text-[10px] text-gray-600 mt-0.5">{result.year}</div>
     </button>
   )
 }

@@ -33,9 +33,34 @@ export interface MediaResult {
   genres?: string[];
   imdb_id?: string;
   poster_path?: string | null;
+  library?: string;
+  tags?: string[];
   sources: MediaSource[];
   bestSource: { endpointUrl: string; encoding: string } | null;
   watchlist: WatchlistInfo | null;
+}
+
+export interface LibraryRecord {
+  id: string;
+  name: string;
+  color?: string;
+  defaultPath?: string;
+}
+
+export interface SectionFilter {
+  library?: string;
+  genre?: string;
+  watchStatus?: string;
+  kind?: string;
+  available?: boolean;
+}
+
+export interface SectionRecord {
+  id: string;
+  name: string;
+  view: 'row' | 'grid';
+  filter: SectionFilter;
+  sort?: 'addedAt' | 'year' | 'title';
 }
 
 export interface SearchResponse {
@@ -191,6 +216,8 @@ export interface ImportItem {
   files: ScannedFile[];
   selected_seasons?: number[] | null;
   match: MatchSource;
+  library?: string;
+  tags?: string[];
 }
 
 export interface ImportResult {
@@ -257,12 +284,14 @@ export const api = {
     post<{ updated: boolean }>(`/auth/users/${pubKey}/reset-recovery`, { recoveryPassword }),
   getAuthConfig: () => get<AuthConfig>('/auth/config'),
   setAuthConfig: (config: Partial<AuthConfig>) => patch<AuthConfig>('/auth/config', config),
-  search: (params: { q?: string; kind?: string; available?: boolean; watchStatus?: string }) => {
+  search: (params: { q?: string; kind?: string; available?: boolean; watchStatus?: string; library?: string; genre?: string }) => {
     const qs = new URLSearchParams();
     if (params.q)           qs.set('q', params.q);
     if (params.kind)        qs.set('kind', params.kind);
     if (params.available)   qs.set('available', 'true');
     if (params.watchStatus) qs.set('watchStatus', params.watchStatus);
+    if (params.library)     qs.set('library', params.library);
+    if (params.genre)       qs.set('genre', params.genre);
     return get<SearchResponse>(`/search?${qs}`);
   },
   getMedia: (id: string) => get<MediaResult>(`/media/${id}`),
@@ -285,7 +314,22 @@ export const api = {
     get<{ status: 'running' | 'done' | 'error'; found: number; new_count?: number; already_ingested_count?: number; dry_run: boolean; files: ScannedFile[]; ingested?: number; failed?: number; failures?: Array<{ path: string; error: string }>; error?: string }>(`/pvfs/scan/job/${jobId}`),
   matchSearch: (body: { items: Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown' }>; threshold?: number }) =>
     post<{ results: MatchSearchResult[]; threshold: number }>('/media/match/search', body),
-  importBatch: (body: { items: ImportItem[] }) =>
+  importBatch: (body: { items: ImportItem[]; library?: string; tags?: string[] }) =>
     post<ImportResult>('/media/import/batch', body),
   artworkUrl: (localPath: string) => `${BASE}/pvfs/artwork?path=${encodeURIComponent(localPath)}`,
+  // Libraries
+  getLibraries: () => get<{ libraries: LibraryRecord[] }>('/libraries'),
+  createLibrary: (body: { name: string; color?: string; defaultPath?: string }) =>
+    post<LibraryRecord>('/libraries', body),
+  updateLibrary: (id: string, body: { name?: string; color?: string; defaultPath?: string }) =>
+    patch<LibraryRecord>(`/libraries/${id}`, body),
+  deleteLibrary: (id: string) => del<{ removed: boolean }>(`/libraries/${id}`),
+  // Sections
+  getSections: () => get<{ sections: SectionRecord[] }>('/config/sections'),
+  createSection: (body: { name: string; view?: string; filter?: SectionFilter; sort?: string }) =>
+    post<SectionRecord>('/config/sections', body),
+  updateSection: (id: string, body: { name?: string; view?: string; filter?: SectionFilter; sort?: string }) =>
+    patch<SectionRecord>(`/config/sections/${id}`, body),
+  deleteSection: (id: string) => del<{ removed: boolean }>(`/config/sections/${id}`),
+  reorderSections: (ids: string[]) => post<{ sections: SectionRecord[] }>('/config/sections/reorder', { ids }),
 };

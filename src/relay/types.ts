@@ -29,6 +29,8 @@ export interface MediaPayload extends Record<string, unknown> {
   duration_ms?: number;
   genres?: string[];
   poster_path?: string;
+  library?: string;
+  tags?: string[];
 }
 
 // ── storage_pointer ───────────────────────────────────────────────────────
