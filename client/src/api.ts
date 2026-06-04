@@ -307,7 +307,7 @@ export const api = {
       '/auth/login-password', { password, ...(name ? { name } : {}) }
     ),
   getLoginUsers: () =>
-    getPublic<{ users: { name: string | null; hasPassword: boolean }[] }>('/auth/users'),
+    getPublic<{ users: { name: string | null; hasPassword: boolean }[] }>('/auth/login-users'),
   createInvite: () => post<{ token: string; expiresAt: number }>('/auth/invite', {}),
   listUsers: () => get<{ users: UserRecord[] }>('/auth/users'),
   removeUser: (pubKey: string) => del<{ removed: boolean }>(`/auth/users/${pubKey}`),

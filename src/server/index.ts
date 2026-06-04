@@ -179,7 +179,7 @@ const API_PREFIXES = [
   "/pvfs", "/config", "/stream", "/libraries", "/plex",
 ];
 // Auth sub-routes that are public (no Bearer token required)
-const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/users", "/auth/recover", "/auth/login-password"]);
+const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/login-users", "/auth/recover", "/auth/login-password"]);
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
@@ -259,7 +259,7 @@ app.get("/auth/status", async () => ({
   hasOwner: usersMap.size > 0,
 }));
 
-app.get("/auth/users", async () => ({
+app.get("/auth/login-users", async () => ({
   users: [...usersMap.values()].map(u => ({ name: u.name ?? null, hasPassword: !!u.recoveryPasswordHash })),
 }));
 
