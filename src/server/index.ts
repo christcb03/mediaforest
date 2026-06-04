@@ -1380,6 +1380,50 @@ app.get<{ Params: { jobId: string } }>("/pvfs/scan/job/:jobId", async (req, repl
   return reply.send(job);
 });
 
+// ── PVFS unimported files ─────────────────────────────────────────────────
+// Returns PVFS file nodes that have no storage_pointer in the MediaForest feed.
+// Used by the Add Media modal to surface local files that are ready to import.
+
+import { parseMediaPath } from "../scan/scan.js";
+
+app.get("/pvfs/unimported", async (_req, reply) => {
+  // Collect all stream URLs already referenced by storage_pointer nodes
+  const allResults = engine.search({});
+  const importedStreamUrls = new Set<string>();
+  for (const r of allResults) {
+    for (const s of r.sources) {
+      importedStreamUrls.add(s.storagePointer.payload.endpoint_url as string);
+    }
+  }
+
+  // Get all file nodes from PhraseVault
+  let pvNodes: Array<{ id: string; payload: { label?: string; original_filename?: string; size_bytes?: number; mime_type?: string } }> = [];
+  try {
+    const resp = await pv.get<{ nodes: typeof pvNodes }>("/pvfs/locations");
+    pvNodes = resp.nodes ?? [];
+  } catch {
+    return reply.send({ files: [] });
+  }
+
+  // Filter to files not yet imported into MediaForest
+  const unimported = pvNodes
+    .filter(n => !importedStreamUrls.has(`/stream/${n.id}`))
+    .map(n => {
+      const filename = n.payload.original_filename ?? n.payload.label ?? "";
+      const parsed = filename ? parseMediaPath(filename) : { title: filename, year: null, kind: "unknown" as const, season: null, episode: null };
+      return {
+        fileNodeId: n.id,
+        filename,
+        size_bytes: n.payload.size_bytes ?? 0,
+        streamUrl: `/stream/${n.id}`,
+        parsed,
+      };
+    })
+    .filter(f => f.filename); // skip nodes with no usable name
+
+  return reply.send({ files: unimported });
+});
+
 // ── Media match (TMDB + confidence scoring) ───────────────────────────────
 
 app.post<{ Body: { items: Array<{ title: string; year: number | null; kind: "movie" | "series" | "unknown" }>; threshold?: number } }>(

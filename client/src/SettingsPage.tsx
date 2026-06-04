@@ -71,6 +71,17 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
       .finally(() => setLoading(false))
   }, [])
 
+  // Libraries and sections are per-user — load for everyone
+  useEffect(() => {
+    api.getLibraries()
+      .then(r => setLibraries(r.libraries))
+      .catch(() => {})
+    api.getSections()
+      .then(r => setSections(r.sections))
+      .catch(() => {})
+  }, [])
+
+  // User management and server config are owner-only
   useEffect(() => {
     if (!isOwner) return
     api.listUsers()
@@ -78,12 +89,6 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
       .catch(err => { if (err instanceof UnauthorizedError) onUnauthorized() })
     api.getAuthConfig()
       .then(setAuthConfig)
-      .catch(() => {})
-    api.getLibraries()
-      .then(r => setLibraries(r.libraries))
-      .catch(() => {})
-    api.getSections()
-      .then(r => setSections(r.sections))
       .catch(() => {})
   }, [isOwner])
 
@@ -514,15 +519,14 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
           </section>
         )}
 
-        {/* Owner: Sections */}
-        {isOwner && (
-          <section>
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
-              Home Sections
-            </h2>
-            <p className="text-xs text-gray-500 mb-4">
-              Sections appear on the home page in order. Each section filters by library, genre, kind, or watch status. Row view shows a horizontal scroll strip; grid view shows a poster grid.
-            </p>
+        {/* Home Sections — per user, everyone can customize */}
+        <section>
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+            Home Sections
+          </h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Sections appear on your home page in order. Each section filters by library, genre, kind, or watch status. Row view shows a horizontal scroll strip; grid view shows a poster grid.
+          </p>
 
             <div className="space-y-2 mb-4">
               {sections.map((sec, idx) => (
@@ -636,7 +640,6 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
               {secMsg && <p className="text-xs text-green-400">{secMsg}</p>}
             </div>
           </section>
-        )}
 
         {/* Plex */}
         <section>

@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { api, UnauthorizedError } from './api'
-import type { TmdbSearchResult, TmdbDetails } from './api'
+import type { TmdbSearchResult, TmdbDetails, UnimportedFile } from './api'
 
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w92'
 
@@ -11,6 +11,12 @@ interface Props {
 }
 
 type Step = 'search' | 'pick' | 'storage'
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return ''
+  const gb = bytes / 1e9
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1e6).toFixed(0)} MB`
+}
 
 export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Props) {
   const [step, setStep] = useState<Step>('search')
@@ -23,6 +29,10 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
   const [error, setError] = useState('')
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // PVFS unimported files
+  const [unimported, setUnimported] = useState<UnimportedFile[]>([])
+  const [selectedPvfsFile, setSelectedPvfsFile] = useState<UnimportedFile | null>(null)
+
   // Storage form state
   const [endpointUrl, setEndpointUrl] = useState('')
   const [encoding, setEncoding] = useState('1080p')
@@ -33,9 +43,16 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
   const [contentHash, setContentHash] = useState('')
   const [alsoWatchlist, setAlsoWatchlist] = useState(true)
 
+  useEffect(() => {
+    api.pvfsUnimported()
+      .then(r => setUnimported(r.files))
+      .catch(() => { /* PVFS unavailable, silently skip */ })
+  }, [])
+
   async function handleSearch(q: string) {
     setQuery(q)
     setError('')
+    setSelectedPvfsFile(null)
     if (searchRef.current) clearTimeout(searchRef.current)
     if (!q.trim()) { setResults([]); return }
     searchRef.current = setTimeout(async () => {
@@ -52,13 +69,24 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
     }, 350)
   }
 
+  function handlePvfsClick(f: UnimportedFile) {
+    setSelectedPvfsFile(f)
+    // Pre-fill the stream URL and size, then jump straight to pick/storage
+    setEndpointUrl(f.streamUrl)
+    setSizeGb(f.size_bytes > 0 ? (f.size_bytes / 1e9).toFixed(2) : '')
+    // Pre-search TMDB with the parsed title
+    const q = f.parsed.title + (f.parsed.year ? ` ${f.parsed.year}` : '')
+    setQuery(q)
+    handleSearch(q)
+  }
+
   async function handleSelect(r: TmdbSearchResult) {
     setLoadingDetails(true)
     setError('')
     try {
       const d = await api.tmdbDetails(r.tmdb_id, r.media_type)
       setSelected(d)
-      setStep('pick')
+      setStep(selectedPvfsFile ? 'storage' : 'pick')
     } catch (e) {
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError('Failed to load details from TMDB.')
@@ -135,9 +163,11 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
     }
   }
 
-  const titleText = step === 'search' ? 'Add Media — Search TMDB'
+  const titleText = step === 'search' ? 'Add Media'
     : step === 'pick' ? selected?.title ?? ''
     : `Add to Library — ${selected?.title}`
+
+  const showUnimported = step === 'search' && unimported.length > 0 && !query.trim()
 
   return (
     <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-6" onClick={onClose}>
@@ -160,6 +190,48 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
               placeholder="Search movies & TV shows…"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 mb-4"
             />
+
+            {/* Unimported PVFS files — shown when search is empty */}
+            {showUnimported && (
+              <div className="mb-4">
+                <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Local files not yet in library</div>
+                <div className="space-y-1.5">
+                  {unimported.slice(0, 12).map(f => (
+                    <button
+                      key={f.fileNodeId}
+                      onClick={() => handlePvfsClick(f)}
+                      disabled={loadingDetails}
+                      className="flex items-center gap-3 w-full bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-green-600 rounded-lg px-3 py-2 text-left transition-colors disabled:opacity-50"
+                    >
+                      <span className="text-base shrink-0">🎞️</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-white truncate">
+                          {f.parsed.title || f.filename}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {[
+                            f.parsed.year,
+                            f.parsed.kind !== 'unknown' && f.parsed.kind,
+                            f.parsed.season != null && `S${String(f.parsed.season).padStart(2, '0')}`,
+                            formatBytes(f.size_bytes),
+                          ].filter(Boolean).join(' · ')}
+                        </div>
+                      </div>
+                      <span className="text-xs text-green-600 shrink-0">Match →</span>
+                    </button>
+                  ))}
+                  {unimported.length > 12 && (
+                    <div className="text-xs text-gray-600 text-center pt-1">
+                      +{unimported.length - 12} more — use search to find specific titles
+                    </div>
+                  )}
+                </div>
+                <div className="border-t border-gray-800 mt-4 pt-4">
+                  <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">Or search TMDB directly</div>
+                </div>
+              </div>
+            )}
+
             {searching && <div className="text-sm text-gray-500 text-center py-4">Searching…</div>}
             {!searching && results.length === 0 && query && (
               <div className="text-sm text-gray-600 text-center py-4">No results.</div>
@@ -188,7 +260,7 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
           </div>
         )}
 
-        {/* ── Step 2: Pick action ── */}
+        {/* ── Step 2: Pick action (only shown when no PVFS file pre-selected) ── */}
         {step === 'pick' && selected && (
           <div className="p-6">
             <div className="flex gap-3 items-start mb-6">
@@ -234,7 +306,7 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
             {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
 
             <button
-              onClick={() => setStep('search')}
+              onClick={() => { setStep('search'); setSelectedPvfsFile(null) }}
               className="mt-4 text-xs text-gray-500 hover:text-gray-300"
             >
               ← Back to search
@@ -245,15 +317,20 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
         {/* ── Step 3: Storage details ── */}
         {step === 'storage' && selected && (
           <form onSubmit={handleAddToLibrary} className="p-6 space-y-4">
+            {selectedPvfsFile && (
+              <div className="bg-green-950/50 border border-green-800 rounded-lg px-3 py-2 text-xs text-green-400">
+                Linking local file: <span className="font-medium">{selectedPvfsFile.parsed.title || selectedPvfsFile.filename}</span>
+              </div>
+            )}
             <div className="space-y-3">
               <label className="block">
                 <span className="text-xs text-gray-400">Stream URL *</span>
                 <input
                   required
-                  autoFocus
+                  autoFocus={!selectedPvfsFile}
                   value={endpointUrl}
                   onChange={e => setEndpointUrl(e.target.value)}
-                  placeholder="https://…"
+                  placeholder="https://… or /stream/…"
                   className="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
                 />
               </label>
@@ -317,7 +394,7 @@ export default function AddMediaModal({ onClose, onAdded, onUnauthorized }: Prop
             {error && <p className="text-red-400 text-xs">{error}</p>}
 
             <div className="flex gap-3 pt-2">
-              <button type="button" onClick={() => setStep('pick')}
+              <button type="button" onClick={() => setStep(selectedPvfsFile ? 'search' : 'pick')}
                 className="text-sm text-gray-400 hover:text-white px-4 py-2 rounded border border-gray-700 hover:border-gray-500">
                 ← Back
               </button>

@@ -242,6 +242,20 @@ export interface IngestResult {
   failures: Array<{ path: string; error: string }>;
 }
 
+export interface UnimportedFile {
+  fileNodeId: string;
+  filename: string;
+  size_bytes: number;
+  streamUrl: string;
+  parsed: {
+    title: string;
+    year: number | null;
+    kind: 'movie' | 'series' | 'unknown';
+    season: number | null;
+    episode: number | null;
+  };
+}
+
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PUT',
@@ -339,6 +353,7 @@ export const api = {
   getProviders: () => get<ProviderConfig[]>('/config/providers'),
   upsertProvider: (providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string; [key: string]: unknown }) =>
     put<{ provider_id: string; enabled: boolean; updated: boolean }>(`/config/providers/${providerId}`, body),
+  pvfsUnimported: () => get<{ files: UnimportedFile[] }>('/pvfs/unimported'),
   pvfsScan: (body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number }) =>
     post<{ jobId: string }>('/pvfs/scan', body),
   pvfsScanJob: (jobId: string) =>

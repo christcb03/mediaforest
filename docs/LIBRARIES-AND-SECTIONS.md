@@ -192,13 +192,20 @@ Section view mode (row/grid) and section filters are configurable from Settings.
 - [x] Migration: existing root-level `providers`/`sections` moved to owner's entry on startup
 - [x] Section CRUD endpoints now scoped to the requesting user (no longer owner-only)
 - [x] TMDB search/details/import use the requesting user's configured API key
-- [x] Plex and Plex-import remain server-level (owner's config only)
+- [x] Plex server config stored in owner's userSettings; all users can use it via toolbar/PlexSyncPage
+- [x] Section editing in Settings now available to all users (no longer owner-only)
+- [x] SettingsPage loads providers and sections for all users, not just owners
 
-### Phase D — import staging (next session)
+### Phase F — PVFS unimported in Add Media
+- [x] `GET /pvfs/unimported` — returns PVFS file nodes not yet referenced by any storage_pointer
+- [x] AddMediaModal shows local unimported files first when search is empty (green "Match →" rows)
+- [x] Clicking a PVFS file pre-fills the stream URL + size, pre-searches TMDB, skips directly to storage step
+
+### Phase D — import staging (pending)
 - [ ] `staged_imports.json` persistence
 - [ ] `/import/stage` and `/import/commit/:id` endpoints
 - [ ] Stage/commit UI in ScanPage
-- [ ] Staged badge in header
+- [ ] Staged batch review panel with commit/discard
 
 ---
 
