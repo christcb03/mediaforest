@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { api, TOKEN_KEY, UnauthorizedError } from './api'
+import { api, BASE, TOKEN_KEY, UnauthorizedError } from './api'
 import type { MediaResult, HealthResponse, WatchStatus, LoginResponse } from './api'
+
+const TMDB_IMG = 'https://image.tmdb.org/t/p/w92'
 import LoginPage from './LoginPage'
 import AddMediaModal from './AddMediaModal'
 import SettingsPage from './SettingsPage'
@@ -80,7 +82,7 @@ export default function App() {
 
   if (!token) return <LoginPage onLogin={handleLogin} />
   if (showSettings) return (
-    <SettingsPage onClose={() => setShowSettings(false)} onUnauthorized={handleUnauthorized} />
+    <SettingsPage onClose={() => setShowSettings(false)} onUnauthorized={handleUnauthorized} userRole={currentUser?.role as 'owner' | 'member' | undefined} />
   )
   if (showScan) return (
     <ScanPage onClose={() => setShowScan(false)} onUnauthorized={handleUnauthorized} />
@@ -250,8 +252,18 @@ function MediaCard({ result, onSelect }: { result: MediaResult; onSelect: (r: Me
   return (
     <button
       onClick={() => onSelect(result)}
-      className="flex items-center gap-4 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-lg px-4 py-3 text-left transition-colors w-full"
+      className="flex items-center gap-3 bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-lg px-3 py-2.5 text-left transition-colors w-full"
     >
+      {result.poster_path ? (
+        <img
+          src={`${TMDB_IMG}${result.poster_path}`}
+          alt=""
+          className="w-8 h-12 object-cover rounded shrink-0"
+          loading="lazy"
+        />
+      ) : (
+        <div className="w-8 h-12 bg-gray-800 rounded shrink-0" />
+      )}
       <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-2">
           <span className="font-medium text-white truncate">{result.title}</span>
@@ -361,7 +373,7 @@ function DetailPanel({
               <div className="flex items-center gap-2 shrink-0">
                 <span className="text-xs text-gray-300">{s.encoding}</span>
                 {s.available ? (
-                  <a href={s.endpointUrl} target="_blank" rel="noreferrer"
+                  <a href={`${BASE}${s.endpointUrl}`} target="_blank" rel="noreferrer"
                     className="text-xs bg-indigo-600 hover:bg-indigo-500 rounded px-2 py-1"
                     onClick={e => e.stopPropagation()}>
                     Play

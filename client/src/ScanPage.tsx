@@ -75,6 +75,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [newCount, setNewCount] = useState(0)
   const [alreadyCount, setAlreadyCount] = useState(0)
   const [error, setError] = useState('')
+  const [matchError, setMatchError] = useState('')
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
 
   // Show/movie selection: key = title, value = selected season numbers (null = all, empty Set = none)
@@ -156,7 +157,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           })
           return next
         })
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Match failed'
+        setMatchError(msg)
         setMatchStates(prev => {
           const next = new Map(prev)
           chunk.forEach(q => {
@@ -197,6 +200,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setSelectedMovies(new Set())
     setMatchStates(new Map())
     setMatchingProgress({ done: 0, total: 0 })
+    setMatchError('')
     setImportResult(null)
     setPhase('scanning')
     setScanProgress(0)
@@ -467,7 +471,10 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm">← Back</button>
         <h1 className="text-base font-semibold text-white">Library Import</h1>
         {phase === 'scanning' && (
-          <span className="text-xs text-gray-500 ml-2 animate-pulse">Scanning… {scanProgress} files found</span>
+          <span className="text-xs text-gray-500 ml-2 animate-pulse">
+            Scanning… {scanProgress} found
+            {matchingProgress.total > 0 && ` · matching ${matchingProgress.done}/${matchingProgress.total}`}
+          </span>
         )}
         {phase === 'ready' && matchingProgress.total > 0 && !matchingDone && (
           <span className="text-xs text-gray-500 ml-2 animate-pulse">
@@ -527,8 +534,20 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
 
         {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
 
-        {/* Scanning progress */}
-        {phase === 'scanning' && (
+        {matchError && (
+          <div className="mb-4 px-4 py-3 rounded-lg bg-yellow-950 border border-yellow-800 text-sm text-yellow-300 flex items-start gap-2">
+            <span className="shrink-0">⚠</span>
+            <span>
+              TMDB matching failed: <span className="font-mono">{matchError}</span>
+              {matchError.toLowerCase().includes('tmdb') || matchError.includes('503') || matchError.includes('not configured')
+                ? <> — <button onClick={onClose} className="underline hover:text-yellow-200">go to Settings to add your TMDB token</button></>
+                : null}
+            </span>
+          </div>
+        )}
+
+        {/* Scanning — show spinner until first files arrive, then step aside */}
+        {phase === 'scanning' && scanFiles.length === 0 && (
           <div className="text-center text-gray-500 py-16 text-sm animate-pulse">
             Scanning {dirPath}…
           </div>
@@ -558,8 +577,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           </div>
         )}
 
-        {/* Results */}
-        {phase === 'ready' && (
+        {/* Results — visible during scanning (progressive) and after scan completes */}
+        {(phase === 'ready' || (phase === 'scanning' && scanFiles.length > 0)) && (
           <div className="space-y-8">
             {/* TV Shows */}
             {shows.length > 0 && (

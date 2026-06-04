@@ -27,15 +27,17 @@ import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync } from "../scan/scan.js";
 import { scoreCandidates } from "../scan/matcher.js";
 import { blake3 } from "@noble/hashes/blake3";
+import argon2 from "argon2";
 
 // ── Config from environment ────────────────────────────────────────────────
 
-const DATA_DIR   = process.env.MF_DATA_DIR   ?? "./data";
-const PORT       = parseInt(process.env.MF_PORT   ?? "8080", 10);
-const HOST       = process.env.MF_HOST        ?? "0.0.0.0";
-const LOG_LEVEL  = process.env.MF_LOG_LEVEL   ?? "info";
-const PV_URL     = process.env.MF_PV_URL      ?? "http://localhost:8081";
-const MEDIA_DIR  = process.env.MF_MEDIA_DIR   ?? "";
+const DATA_DIR          = process.env.MF_DATA_DIR          ?? "./data";
+const PORT              = parseInt(process.env.MF_PORT     ?? "8080", 10);
+const HOST              = process.env.MF_HOST              ?? "0.0.0.0";
+const LOG_LEVEL         = process.env.MF_LOG_LEVEL         ?? "info";
+const PV_URL            = process.env.MF_PV_URL            ?? "http://localhost:8081";
+const MEDIA_DIR         = process.env.MF_MEDIA_DIR         ?? "";
+const OPEN_REGISTRATION_ENV = process.env.MF_OPEN_REGISTRATION === "true";
 
 // ── Server key + user registry ─────────────────────────────────────────────
 
@@ -44,6 +46,14 @@ interface UserRecord {
   name?: string;
   role: "owner" | "member";
   createdAt: number;
+  recoveryPasswordHash?: string;
+}
+
+interface ProviderRecord {
+  provider_id: string;
+  name: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
 }
 
 interface ServerKey {
@@ -51,6 +61,8 @@ interface ServerKey {
   identityPrivKey: string;
   users: UserRecord[];
   authPubKey?: string | null;  // legacy v1 field — migrated on load
+  registrationMode?: "open" | "closed";
+  providers?: ProviderRecord[];
 }
 
 interface InviteToken {
@@ -102,6 +114,10 @@ function saveInvites(invites: InviteToken[]): void {
 }
 
 const serverKey = loadOrCreateServerKey();
+
+// registrationMode: persisted in server_key.json; env var sets initial default when not persisted
+let registrationMode: "open" | "closed" = serverKey.registrationMode ?? (OPEN_REGISTRATION_ENV ? "open" : "closed");
+
 const privKeyHex = serverKey.identityPrivKey;
 const identity = identityFromPrivKey(privKeyHex);
 const pubKeyHex = Buffer.from(identity.publicKey).toString("hex");
@@ -137,7 +153,7 @@ const API_PREFIXES = [
   "/pvfs", "/config", "/stream",
 ];
 // Auth sub-routes that are public (no Bearer token required)
-const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status"]);
+const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/recover"]);
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
@@ -250,8 +266,8 @@ app.post<{ Body: { challenge?: string; signature?: string } }>("/auth/verify", a
   };
 });
 
-app.post<{ Body: { pubKey?: string; inviteToken?: string; name?: string } }>("/auth/register", async (req, reply) => {
-  const { pubKey, inviteToken, name } = req.body ?? {};
+app.post<{ Body: { pubKey?: string; inviteToken?: string; name?: string; recoveryPassword?: string } }>("/auth/register", async (req, reply) => {
+  const { pubKey, inviteToken, name, recoveryPassword } = req.body ?? {};
   if (!pubKey || !/^[0-9a-f]{66}$/.test(pubKey)) {
     return reply.status(400).send({ error: "pubKey must be a 33-byte compressed secp256k1 key in hex (66 chars)" });
   }
@@ -259,10 +275,10 @@ app.post<{ Body: { pubKey?: string; inviteToken?: string; name?: string } }>("/a
 
   let role: "owner" | "member";
   if (usersMap.size === 0) {
-    // First user — becomes owner, no invite needed
     role = "owner";
+  } else if (registrationMode === "open") {
+    role = "member";
   } else {
-    // Subsequent users require a valid invite token
     if (!inviteToken) return reply.status(403).send({ error: "invite token required" });
     const invites = loadInvites();
     const invite = invites.find(i => i.token === inviteToken && !i.used && i.expiresAt > Date.now());
@@ -272,12 +288,63 @@ app.post<{ Body: { pubKey?: string; inviteToken?: string; name?: string } }>("/a
     role = "member";
   }
 
-  const user: UserRecord = { pubKey, name: name?.trim() || undefined, role, createdAt: Date.now() };
+  let recoveryPasswordHash: string | undefined;
+  if (recoveryPassword && recoveryPassword.length >= 8) {
+    recoveryPasswordHash = await argon2.hash(recoveryPassword, { type: argon2.argon2id });
+  }
+
+  const user: UserRecord = { pubKey, name: name?.trim() || undefined, role, createdAt: Date.now(), recoveryPasswordHash };
   usersMap.set(pubKey, user);
   serverKey.users = [...usersMap.values()];
   saveServerKey(serverKey);
 
   return { registered: true, serverIdentity: pubKeyHex, role };
+});
+
+app.post<{ Body: { recoveryPassword?: string; newPubKey?: string } }>("/auth/recover", async (req, reply) => {
+  const { recoveryPassword, newPubKey } = req.body ?? {};
+  if (!recoveryPassword || !newPubKey) {
+    return reply.status(400).send({ error: "recoveryPassword and newPubKey required" });
+  }
+  if (!/^[0-9a-f]{66}$/.test(newPubKey)) {
+    return reply.status(400).send({ error: "newPubKey must be a 33-byte compressed secp256k1 key in hex (66 chars)" });
+  }
+
+  await new Promise(r => setTimeout(r, 500)); // slow brute-force attempts
+
+  let matchedUser: UserRecord | null = null;
+  for (const user of usersMap.values()) {
+    if (!user.recoveryPasswordHash) continue;
+    try {
+      if (await argon2.verify(user.recoveryPasswordHash, recoveryPassword)) {
+        matchedUser = user;
+        break;
+      }
+    } catch { continue; }
+  }
+
+  if (!matchedUser) {
+    return reply.status(401).send({ error: "invalid recovery password" });
+  }
+
+  if (usersMap.has(newPubKey) && newPubKey !== matchedUser.pubKey) {
+    return reply.status(409).send({ error: "this key is already registered" });
+  }
+
+  const oldPubKey = matchedUser.pubKey;
+  usersMap.delete(oldPubKey);
+  const updatedUser: UserRecord = { ...matchedUser, pubKey: newPubKey };
+  usersMap.set(newPubKey, updatedUser);
+  serverKey.users = [...usersMap.values()];
+  saveServerKey(serverKey);
+
+  return {
+    token: issueSession(newPubKey),
+    identity: pubKeyHex,
+    userPubKey: newPubKey,
+    userRole: updatedUser.role,
+    userName: updatedUser.name ?? null,
+  };
 });
 
 app.post("/auth/invite", async (req, reply) => {
@@ -308,8 +375,65 @@ app.get("/auth/users", async (req, reply) => {
       name: u.name ?? null,
       role: u.role,
       createdAt: u.createdAt,
+      hasRecovery: !!u.recoveryPasswordHash,
     })),
   };
+});
+
+app.delete<{ Params: { pubKey: string } }>("/auth/users/:pubKey", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const { pubKey } = req.params;
+  const target = usersMap.get(pubKey);
+  if (!target) return reply.status(404).send({ error: "user not found" });
+  if (target.role === "owner") return reply.status(403).send({ error: "cannot remove owner account" });
+  usersMap.delete(pubKey);
+  serverKey.users = [...usersMap.values()];
+  saveServerKey(serverKey);
+  for (const [tok, s] of sessions) {
+    if (s.userPubKey === pubKey) sessions.delete(tok);
+  }
+  return { removed: true };
+});
+
+app.post<{ Params: { pubKey: string }; Body: { recoveryPassword?: string } }>(
+  "/auth/users/:pubKey/reset-recovery",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+    const { pubKey } = req.params;
+    const { recoveryPassword } = req.body ?? {};
+    const target = usersMap.get(pubKey);
+    if (!target) return reply.status(404).send({ error: "user not found" });
+    let recoveryPasswordHash: string | undefined;
+    if (recoveryPassword && recoveryPassword.length >= 8) {
+      recoveryPasswordHash = await argon2.hash(recoveryPassword, { type: argon2.argon2id });
+    }
+    const updated: UserRecord = { ...target, recoveryPasswordHash };
+    usersMap.set(pubKey, updated);
+    serverKey.users = [...usersMap.values()];
+    saveServerKey(serverKey);
+    return { updated: true };
+  },
+);
+
+app.get("/auth/config", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  return { registrationMode };
+});
+
+app.patch<{ Body: { registrationMode?: "open" | "closed" } }>("/auth/config", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const { registrationMode: newMode } = req.body ?? {};
+  if (newMode !== "open" && newMode !== "closed") {
+    return reply.status(400).send({ error: "registrationMode must be 'open' or 'closed'" });
+  }
+  registrationMode = newMode;
+  serverKey.registrationMode = newMode;
+  saveServerKey(serverKey);
+  return { registrationMode };
 });
 
 // ── Health ─────────────────────────────────────────────────────────────────
@@ -449,31 +573,57 @@ app.delete<{ Params: { feedKey: string } }>("/follow/:feedKey", async (req) => {
 
 app.get("/following", async () => ({ keys: followedKeys }));
 
-// ── Config / provider proxy (delegates to PhraseVault) ────────────────────
+// ── Config / providers (stored locally in server_key.json) ────────────────
 
-app.get("/config/providers", async (_req, reply) => {
-  try {
-    return await pv.getProviders();
-  } catch (err) {
-    return reply.status(502).send({ error: `PhraseVault unavailable: ${err}` });
+const DEFAULT_PROVIDERS: ProviderRecord[] = [
+  { provider_id: "tmdb", name: "TMDB", enabled: false, config: {} },
+];
+
+function getProvidersLocal(): ProviderRecord[] {
+  if (!serverKey.providers || serverKey.providers.length === 0) {
+    return DEFAULT_PROVIDERS.map(p => ({ ...p }));
   }
-});
+  // Merge: ensure all known defaults exist
+  const map = new Map(serverKey.providers.map(p => [p.provider_id, p]));
+  for (const def of DEFAULT_PROVIDERS) {
+    if (!map.has(def.provider_id)) map.set(def.provider_id, { ...def });
+  }
+  return [...map.values()];
+}
+
+function saveProviderLocal(providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string }): ProviderRecord {
+  if (!serverKey.providers) serverKey.providers = DEFAULT_PROVIDERS.map(p => ({ ...p }));
+  const existing = serverKey.providers.find(p => p.provider_id === providerId);
+  if (existing) {
+    if (body.enabled !== undefined) existing.enabled = body.enabled;
+    if (body.name) existing.name = body.name;
+    if (body.read_access_token !== undefined) existing.config.read_access_token = body.read_access_token;
+  } else {
+    serverKey.providers.push({
+      provider_id: providerId,
+      name: body.name ?? providerId,
+      enabled: body.enabled ?? false,
+      config: body.read_access_token ? { read_access_token: body.read_access_token } : {},
+    });
+  }
+  saveServerKey(serverKey);
+  return serverKey.providers.find(p => p.provider_id === providerId)!;
+}
+
+app.get("/config/providers", async () => getProvidersLocal());
 
 app.put<{
   Params: { providerId: string };
   Body: { read_access_token?: string; enabled?: boolean; name?: string };
-}>("/config/providers/:providerId", async (req, reply) => {
-  try {
-    return await pv.upsertProvider(req.params.providerId, req.body);
-  } catch (err) {
-    return reply.status(502).send({ error: `PhraseVault unavailable: ${err}` });
-  }
+}>("/config/providers/:providerId", async (req) => {
+  const p = saveProviderLocal(req.params.providerId, req.body);
+  return { provider_id: p.provider_id, enabled: p.enabled, updated: true };
 });
 
 // ── Batch import (scan → confirm → import) ────────────────────────────────
 
 type ImportMatchSource =
-  | { source: 'tmdb'; tmdb_id: string; media_type: 'movie' | 'tv'; title: string; year: string }
+  | { source: 'tmdb'; tmdb_id: string; media_type: 'movie' | 'tv'; title: string; year: string; poster_path?: string | null }
   | { source: 'manual'; title: string; year: number | null; kind: 'movie' | 'series' };
 
 interface ImportItemBody {
@@ -513,7 +663,7 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
           let tvdbId: string | undefined;
           let runtimeMin: number | undefined;
           try {
-            const token = await getTmdbToken();
+            const token = getTmdbToken();
             if (token) {
               const segment = tmdbMatch.media_type === "tv" ? "tv" : "movie";
               const res = await fetch(
@@ -541,6 +691,7 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
             tvdb_id: tvdbId,
             genres,
             duration_ms: runtimeMin ? runtimeMin * 60_000 : undefined,
+            poster_path: tmdbMatch.poster_path ?? undefined,
           });
           await ownStore.append(node);
           mediaNodeId = node.id;
@@ -592,8 +743,10 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 
-async function getTmdbToken(): Promise<string> {
-  return pv.getTmdbToken();
+function getTmdbToken(): string {
+  const providers = getProvidersLocal();
+  const tmdb = providers.find(p => p.provider_id === "tmdb");
+  return (tmdb?.enabled && tmdb?.config?.read_access_token as string) || "";
 }
 
 function tmdbHeaders(token: string) {
@@ -601,7 +754,7 @@ function tmdbHeaders(token: string) {
 }
 
 app.get<{ Querystring: { q?: string } }>("/tmdb/search", async (req, reply) => {
-  const token = await getTmdbToken();
+  const token = getTmdbToken();
   if (!token) return reply.status(503).send({ error: "TMDB not configured — add Read Access Token in Settings" });
   const { q } = req.query;
   if (!q) return reply.status(400).send({ error: "q is required" });
@@ -622,7 +775,7 @@ app.get<{ Querystring: { q?: string } }>("/tmdb/search", async (req, reply) => {
 });
 
 app.get<{ Querystring: { id?: string; type?: string } }>("/tmdb/details", async (req, reply) => {
-  const token = await getTmdbToken();
+  const token = getTmdbToken();
   if (!token) return reply.status(503).send({ error: "TMDB not configured — add Read Access Token in Settings" });
   const { id, type } = req.query;
   if (!id || !type) return reply.status(400).send({ error: "id and type are required" });
@@ -738,7 +891,7 @@ app.get<{ Params: { jobId: string } }>("/pvfs/scan/job/:jobId", async (req, repl
 app.post<{ Body: { items: Array<{ title: string; year: number | null; kind: "movie" | "series" | "unknown" }>; threshold?: number } }>(
   "/media/match/search",
   async (req, reply) => {
-    const token = await getTmdbToken();
+    const token = getTmdbToken();
     if (!token) return reply.status(503).send({ error: "TMDB not configured" });
     const { items, threshold = 0.8 } = req.body;
     if (!Array.isArray(items) || items.length === 0) return reply.status(400).send({ error: "items array is required" });
@@ -928,6 +1081,7 @@ function serializeResult(r: import("../relay/query.js").MediaResult) {
     kind: r.media.payload.kind,
     genres: r.media.payload.genres,
     imdb_id: r.media.payload.imdb_id,
+    poster_path: r.media.payload.poster_path as string | undefined,
     sources: r.sources.map(s => ({
       storageNodeId: s.storagePointer.id,
       endpointUrl: s.storagePointer.payload.endpoint_url,

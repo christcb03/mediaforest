@@ -11,13 +11,14 @@ interface Props {
 }
 
 type AgentState = 'probing' | 'signing' | 'available' | 'unavailable'
-type Mode = 'login' | 'register'
+type Mode = 'login' | 'register' | 'recovery'
 type RegisterAgentState = 'idle' | 'probing' | 'ready' | 'unavailable'
 
 export default function LoginPage({ onLogin }: Props) {
   const [passphrase, setPassphrase] = useState('')
   const [name, setName] = useState('')
   const [inviteToken, setInviteToken] = useState('')
+  const [recoveryPassword, setRecoveryPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [agentState, setAgentState] = useState<AgentState>('probing')
@@ -38,7 +39,7 @@ export default function LoginPage({ onLogin }: Props) {
 
   // Probe companion for register mode — fetch pubkey so no passphrase needed
   useEffect(() => {
-    if (mode !== 'register' && hasOwner !== false) return
+    if (mode !== 'register' && mode !== 'recovery' && hasOwner !== false) return
     if (hasOwner === null) return
     let cancelled = false
 
@@ -73,7 +74,7 @@ export default function LoginPage({ onLogin }: Props) {
 
     probeAgentForRegister()
     return () => { cancelled = true }
-  }, [mode, hasOwner])
+  }, [mode, hasOwner])  // fires for 'register' and 'recovery' modes
 
   // Try local agent for login mode
   useEffect(() => {
@@ -164,7 +165,7 @@ export default function LoginPage({ onLogin }: Props) {
     try {
       const usingAgent = registerAgentState === 'ready' && agentPubKey !== null
       const pubKey = usingAgent ? agentPubKey! : await deriveAuthPubKey(passphrase)
-      await api.register(pubKey, inviteToken || undefined, name || undefined)
+      await api.register(pubKey, inviteToken || undefined, name || undefined, recoveryPassword || undefined)
 
       // Immediately log in after registering
       const BASE = import.meta.env.DEV ? '/api' : ''
@@ -199,6 +200,22 @@ export default function LoginPage({ onLogin }: Props) {
     }
   }
 
+  async function handleRecover(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      const usingAgent = registerAgentState === 'ready' && agentPubKey !== null
+      const newPubKey = usingAgent ? agentPubKey! : await deriveAuthPubKey(passphrase)
+      const resp = await api.recover(recoveryPassword, newPubKey)
+      onLogin(resp)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Recovery failed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const isFirstSetup = hasOwner === false
 
   return (
@@ -216,7 +233,58 @@ export default function LoginPage({ onLogin }: Props) {
           <p className="text-sm text-indigo-400 mt-3">Signing with local agent…</p>
         )}
 
-        {(isFirstSetup || mode === 'register' || agentState === 'unavailable' || agentState === 'available') && (
+        {/* ── Recovery mode ── */}
+        {mode === 'recovery' && (
+          <>
+            <p className="text-sm text-gray-400 mb-1 mt-2">Recover account access.</p>
+            <p className="text-xs text-gray-600 mb-3">Enter your recovery password, then provide your new passphrase (or let the agent supply the new key).</p>
+
+            {registerAgentState === 'probing' && (
+              <p className="text-xs text-gray-500 mb-2">Checking for local auth agent…</p>
+            )}
+            {registerAgentState === 'ready' && (
+              <p className="text-xs text-indigo-400 mb-2">Local auth agent detected — new key will come from agent.</p>
+            )}
+
+            <form onSubmit={handleRecover} className="flex flex-col gap-3 mt-2">
+              <input
+                type="password"
+                value={recoveryPassword}
+                onChange={e => setRecoveryPassword(e.target.value)}
+                placeholder="Recovery password"
+                autoFocus
+                className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
+              />
+              {registerAgentState !== 'ready' && (
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={e => setPassphrase(e.target.value)}
+                  placeholder="New passphrase"
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
+                />
+              )}
+              {error && <p className="text-xs text-red-400">{error}</p>}
+              <button
+                type="submit"
+                disabled={loading || !recoveryPassword || (registerAgentState !== 'ready' && !passphrase)}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors"
+              >
+                {loading ? 'Recovering…' : 'Recover Access'}
+              </button>
+            </form>
+
+            <button
+              onClick={() => { setMode('login'); setError('') }}
+              className="mt-4 text-xs text-gray-600 hover:text-gray-400 w-full text-center"
+            >
+              ← Back to login
+            </button>
+          </>
+        )}
+
+        {/* ── Login / register / first-setup ── */}
+        {mode !== 'recovery' && (isFirstSetup || mode === 'register' || agentState === 'unavailable' || agentState === 'available') && (
           <>
             {isFirstSetup ? (
               <p className="text-sm text-gray-400 mb-1 mt-2">Set up this server — create your owner account.</p>
@@ -284,6 +352,15 @@ export default function LoginPage({ onLogin }: Props) {
                   className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
                 />
               )}
+              {(mode === 'register' || isFirstSetup) && (
+                <input
+                  type="password"
+                  value={recoveryPassword}
+                  onChange={e => setRecoveryPassword(e.target.value)}
+                  placeholder="Recovery password (recommended)"
+                  className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
+                />
+              )}
               {error && <p className="text-xs text-red-400">{error}</p>}
               <button
                 type="submit"
@@ -302,12 +379,22 @@ export default function LoginPage({ onLogin }: Props) {
             </form>
 
             {!isFirstSetup && (
-              <button
-                onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}
-                className="mt-4 text-xs text-gray-600 hover:text-gray-400 w-full text-center"
-              >
-                {mode === 'login' ? 'Have an invite? Register instead →' : '← Back to login'}
-              </button>
+              <div className="mt-4 flex flex-col items-center gap-2">
+                <button
+                  onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}
+                  className="text-xs text-gray-600 hover:text-gray-400 text-center"
+                >
+                  {mode === 'login' ? 'Have an invite? Register instead →' : '← Back to login'}
+                </button>
+                {mode === 'login' && (
+                  <button
+                    onClick={() => { setMode('recovery'); setError('') }}
+                    className="text-xs text-gray-700 hover:text-gray-500 text-center"
+                  >
+                    Can't access your passphrase?
+                  </button>
+                )}
+              </div>
             )}
           </>
         )}

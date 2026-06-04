@@ -1,4 +1,4 @@
-const BASE = import.meta.env.DEV ? '/api' : '';
+export const BASE = import.meta.env.DEV ? '/api' : '';
 
 export const TOKEN_KEY = 'pv_token';
 
@@ -32,6 +32,7 @@ export interface MediaResult {
   kind: 'movie' | 'series' | 'episode' | 'short';
   genres?: string[];
   imdb_id?: string;
+  poster_path?: string | null;
   sources: MediaSource[];
   bestSource: { endpointUrl: string; encoding: string } | null;
   watchlist: WatchlistInfo | null;
@@ -68,6 +69,11 @@ export interface UserRecord {
   name: string | null;
   role: 'owner' | 'member';
   createdAt: number;
+  hasRecovery?: boolean;
+}
+
+export interface AuthConfig {
+  registrationMode: 'open' | 'closed';
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -87,7 +93,23 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (res.status === 401) throw new UnauthorizedError('session expired');
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => null);
+    throw new Error(errBody?.error ?? `${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError('session expired');
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -220,12 +242,21 @@ async function postPublic<T>(path: string, body: unknown): Promise<T> {
 export const api = {
   health: () => fetch(`${BASE}/health`).then(r => r.json()) as Promise<HealthResponse>,
   authStatus: () => fetch(`${BASE}/auth/status`).then(r => r.json()) as Promise<AuthStatusResponse>,
-  register: (pubKey: string, inviteToken?: string, name?: string) =>
+  register: (pubKey: string, inviteToken?: string, name?: string, recoveryPassword?: string) =>
     postPublic<{ registered: boolean; serverIdentity: string; role: string }>(
-      '/auth/register', { pubKey, inviteToken, name }
+      '/auth/register', { pubKey, inviteToken, name, recoveryPassword }
+    ),
+  recover: (recoveryPassword: string, newPubKey: string) =>
+    postPublic<{ token: string; identity: string; userPubKey: string; userRole: 'owner' | 'member'; userName: string | null }>(
+      '/auth/recover', { recoveryPassword, newPubKey }
     ),
   createInvite: () => post<{ token: string; expiresAt: number }>('/auth/invite', {}),
   listUsers: () => get<{ users: UserRecord[] }>('/auth/users'),
+  removeUser: (pubKey: string) => del<{ removed: boolean }>(`/auth/users/${pubKey}`),
+  resetUserRecovery: (pubKey: string, recoveryPassword: string) =>
+    post<{ updated: boolean }>(`/auth/users/${pubKey}/reset-recovery`, { recoveryPassword }),
+  getAuthConfig: () => get<AuthConfig>('/auth/config'),
+  setAuthConfig: (config: Partial<AuthConfig>) => patch<AuthConfig>('/auth/config', config),
   search: (params: { q?: string; kind?: string; available?: boolean; watchStatus?: string }) => {
     const qs = new URLSearchParams();
     if (params.q)           qs.set('q', params.q);
