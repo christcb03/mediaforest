@@ -79,15 +79,21 @@ interface SectionRecord {
   sort?: "addedAt" | "year" | "title";
 }
 
+interface UserSettings {
+  providers?: ProviderRecord[];
+  sections?: SectionRecord[];
+}
+
 interface ServerKey {
   version: number;
   identityPrivKey: string;
   users: UserRecord[];
   authPubKey?: string | null;  // legacy v1 field — migrated on load
   registrationMode?: "open" | "closed";
-  providers?: ProviderRecord[];
+  providers?: ProviderRecord[];   // legacy — migrated to userSettings on load
+  sections?: SectionRecord[];     // legacy — migrated to userSettings on load
   libraries?: LibraryRecord[];
-  sections?: SectionRecord[];
+  userSettings?: Record<string, UserSettings>;
 }
 
 interface InviteToken {
@@ -119,6 +125,22 @@ function loadOrCreateServerKey(): ServerKey {
       delete key.authPubKey;
     }
     key.version = 2;
+    saveServerKey(key);
+  }
+  // Migrate root-level providers/sections to owner's userSettings
+  const ownerRecord = key.users.find(u => u.role === "owner");
+  if (ownerRecord && (key.providers !== undefined || key.sections !== undefined)) {
+    if (!key.userSettings) key.userSettings = {};
+    const ownerSettings = key.userSettings[ownerRecord.pubKey] ?? {};
+    if (key.providers !== undefined && !ownerSettings.providers) {
+      ownerSettings.providers = key.providers;
+    }
+    if (key.sections !== undefined && !ownerSettings.sections) {
+      ownerSettings.sections = key.sections;
+    }
+    key.userSettings[ownerRecord.pubKey] = ownerSettings;
+    delete key.providers;
+    delete key.sections;
     saveServerKey(key);
   }
   return key;
@@ -643,35 +665,41 @@ app.delete<{ Params: { feedKey: string } }>("/follow/:feedKey", async (req) => {
 
 app.get("/following", async () => ({ keys: followedKeys }));
 
-// ── Config / providers (stored locally in server_key.json) ────────────────
+// ── Config / providers (per-user, stored in serverKey.userSettings) ───────
 
 const DEFAULT_PROVIDERS: ProviderRecord[] = [
   { provider_id: "tmdb", name: "TMDB", enabled: false, config: {} },
 ];
 
-function getProvidersLocal(): ProviderRecord[] {
-  if (!serverKey.providers || serverKey.providers.length === 0) {
+function getUserSettings(pubKey: string): UserSettings {
+  if (!serverKey.userSettings) serverKey.userSettings = {};
+  if (!serverKey.userSettings[pubKey]) serverKey.userSettings[pubKey] = {};
+  return serverKey.userSettings[pubKey];
+}
+
+function getProvidersForUser(pubKey: string): ProviderRecord[] {
+  const settings = getUserSettings(pubKey);
+  if (!settings.providers || settings.providers.length === 0) {
     return DEFAULT_PROVIDERS.map(p => ({ ...p }));
   }
-  // Merge: ensure all known defaults exist
-  const map = new Map(serverKey.providers.map(p => [p.provider_id, p]));
+  const map = new Map(settings.providers.map(p => [p.provider_id, p]));
   for (const def of DEFAULT_PROVIDERS) {
     if (!map.has(def.provider_id)) map.set(def.provider_id, { ...def });
   }
   return [...map.values()];
 }
 
-function saveProviderLocal(providerId: string, body: Record<string, unknown>): ProviderRecord {
-  if (!serverKey.providers) serverKey.providers = DEFAULT_PROVIDERS.map(p => ({ ...p }));
-  const existing = serverKey.providers.find(p => p.provider_id === providerId);
-  // Pull known top-level fields; everything else goes into config
+function saveProviderForUser(pubKey: string, providerId: string, body: Record<string, unknown>): ProviderRecord {
+  const settings = getUserSettings(pubKey);
+  if (!settings.providers) settings.providers = DEFAULT_PROVIDERS.map(p => ({ ...p }));
+  const existing = settings.providers.find(p => p.provider_id === providerId);
   const { enabled, name, ...configFields } = body;
   if (existing) {
     if (enabled !== undefined) existing.enabled = enabled as boolean;
     if (name) existing.name = name as string;
     Object.assign(existing.config, configFields);
   } else {
-    serverKey.providers.push({
+    settings.providers.push({
       provider_id: providerId,
       name: (name as string) ?? providerId,
       enabled: (enabled as boolean) ?? false,
@@ -679,16 +707,20 @@ function saveProviderLocal(providerId: string, body: Record<string, unknown>): P
     });
   }
   saveServerKey(serverKey);
-  return serverKey.providers.find(p => p.provider_id === providerId)!;
+  return settings.providers.find(p => p.provider_id === providerId)!;
 }
 
-app.get("/config/providers", async () => getProvidersLocal());
+app.get("/config/providers", async (req) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  return getProvidersForUser(user.pubKey);
+});
 
 app.put<{
   Params: { providerId: string };
   Body: Record<string, unknown>;
 }>("/config/providers/:providerId", async (req) => {
-  const p = saveProviderLocal(req.params.providerId, req.body);
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const p = saveProviderForUser(user.pubKey, req.params.providerId, req.body);
   return { provider_id: p.provider_id, enabled: p.enabled, updated: true };
 });
 
@@ -722,10 +754,14 @@ app.post<{ Body: { name?: string; color?: string; defaultPath?: string } }>("/li
   }
   const lib: LibraryRecord = { id, name: name.trim(), color, defaultPath };
   serverKey.libraries = [...(serverKey.libraries ?? []), lib];
-  // Auto-create a section for this library
-  if (!serverKey.sections) serverKey.sections = defaultSectionsForLibraries([]);
-  if (!serverKey.sections.find(s => s.filter.library === id)) {
-    serverKey.sections.push({ id: `lib-${id}`, name: lib.name, view: "grid", filter: { library: id }, sort: "title" });
+  // Auto-append a library section to each user who already has a custom sections list.
+  // Users still on defaults will pick it up automatically via defaultSectionsForLibraries.
+  const newSection: SectionRecord = { id: `lib-${id}`, name: lib.name, view: "grid", filter: { library: id }, sort: "title" };
+  for (const u of serverKey.users) {
+    const settings = getUserSettings(u.pubKey);
+    if (settings.sections && settings.sections.length > 0 && !settings.sections.find(s => s.filter.library === id)) {
+      settings.sections.push(newSection);
+    }
   }
   saveServerKey(serverKey);
   reply.status(201);
@@ -757,28 +793,35 @@ app.delete<{ Params: { id: string } }>("/libraries/:id", async (req, reply) => {
   return { removed: true };
 });
 
-// ── Sections ──────────────────────────────────────────────────────────────
+// ── Sections (per-user) ───────────────────────────────────────────────────
 
-function getSections(): SectionRecord[] {
-  if (!serverKey.sections || serverKey.sections.length === 0) {
+function getSectionsForUser(pubKey: string): SectionRecord[] {
+  const settings = getUserSettings(pubKey);
+  if (!settings.sections || settings.sections.length === 0) {
     return defaultSectionsForLibraries(serverKey.libraries ?? []);
   }
-  return serverKey.sections;
+  return settings.sections;
 }
 
-app.get("/config/sections", async () => ({ sections: getSections() }));
+function saveSectionsForUser(pubKey: string, sections: SectionRecord[]): void {
+  getUserSettings(pubKey).sections = sections;
+  saveServerKey(serverKey);
+}
+
+app.get("/config/sections", async (req) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  return { sections: getSectionsForUser(user.pubKey) };
+});
 
 app.post<{ Body: { name?: string; view?: string; filter?: SectionFilter; sort?: string } }>(
   "/config/sections",
   async (req, reply) => {
     const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
-    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
     const { name, view = "grid", filter = {}, sort = "addedAt" } = req.body ?? {};
     if (!name?.trim()) return reply.status(400).send({ error: "name is required" });
     const id = `section-${randomBytes(8).toString("hex")}`;
     const section: SectionRecord = { id, name: name.trim(), view: (view === "row" ? "row" : "grid"), filter, sort: sort as SectionRecord["sort"] };
-    serverKey.sections = [...getSections(), section];
-    saveServerKey(serverKey);
+    saveSectionsForUser(user.pubKey, [...getSectionsForUser(user.pubKey), section]);
     reply.status(201);
     return section;
   },
@@ -788,44 +831,37 @@ app.patch<{ Params: { id: string }; Body: { name?: string; view?: string; filter
   "/config/sections/:id",
   async (req, reply) => {
     const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
-    if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
-    const sections = getSections();
+    const sections = getSectionsForUser(user.pubKey);
     const s = sections.find(s => s.id === req.params.id);
     if (!s) return reply.status(404).send({ error: "section not found" });
     if (req.body.name) s.name = req.body.name.trim();
     if (req.body.view) s.view = req.body.view === "row" ? "row" : "grid";
     if (req.body.filter) s.filter = req.body.filter;
     if (req.body.sort) s.sort = req.body.sort as SectionRecord["sort"];
-    serverKey.sections = sections;
-    saveServerKey(serverKey);
+    saveSectionsForUser(user.pubKey, sections);
     return s;
   },
 );
 
 app.delete<{ Params: { id: string } }>("/config/sections/:id", async (req, reply) => {
   const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
-  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
-  const sections = getSections();
+  const sections = getSectionsForUser(user.pubKey);
   const idx = sections.findIndex(s => s.id === req.params.id);
   if (idx === -1) return reply.status(404).send({ error: "section not found" });
   sections.splice(idx, 1);
-  serverKey.sections = sections;
-  saveServerKey(serverKey);
+  saveSectionsForUser(user.pubKey, sections);
   return { removed: true };
 });
 
 app.post<{ Body: { ids: string[] } }>("/config/sections/reorder", async (req, reply) => {
   const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
-  if (user?.role !== "owner") return reply.status(403).send({ error: "owner only" });
   const { ids } = req.body ?? {};
   if (!Array.isArray(ids)) return reply.status(400).send({ error: "ids array required" });
-  const sections = getSections();
+  const sections = getSectionsForUser(user.pubKey);
   const map = new Map(sections.map(s => [s.id, s]));
   const reordered = ids.map(id => map.get(id)).filter(Boolean) as SectionRecord[];
-  // Append any sections not mentioned in ids at the end
   for (const s of sections) { if (!ids.includes(s.id)) reordered.push(s); }
-  serverKey.sections = reordered;
-  saveServerKey(serverKey);
+  saveSectionsForUser(user.pubKey, reordered);
   return { sections: reordered };
 });
 
@@ -848,6 +884,7 @@ interface ImportItemBody {
 }
 
 app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (req, reply) => {
+  const importUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
   const { items } = req.body;
   if (!Array.isArray(items) || items.length === 0) {
     return reply.status(400).send({ error: "items array is required" });
@@ -874,7 +911,7 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
           let tvdbId: string | undefined;
           let runtimeMin: number | undefined;
           try {
-            const token = getTmdbToken();
+            const token = getTmdbToken(importUser.pubKey);
             if (token) {
               const segment = tmdbMatch.media_type === "tv" ? "tv" : "movie";
               const res = await fetch(
@@ -958,8 +995,12 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 
-function getTmdbToken(): string {
-  const providers = getProvidersLocal();
+function getOwnerPubKey(): string | null {
+  return serverKey.users.find(u => u.role === "owner")?.pubKey ?? null;
+}
+
+function getTmdbToken(pubKey: string): string {
+  const providers = getProvidersForUser(pubKey);
   const tmdb = providers.find(p => p.provider_id === "tmdb");
   return (tmdb?.enabled && tmdb?.config?.read_access_token as string) || "";
 }
@@ -969,7 +1010,8 @@ function tmdbHeaders(token: string) {
 }
 
 app.get<{ Querystring: { q?: string } }>("/tmdb/search", async (req, reply) => {
-  const token = getTmdbToken();
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const token = getTmdbToken(user.pubKey);
   if (!token) return reply.status(503).send({ error: "TMDB not configured — add Read Access Token in Settings" });
   const { q } = req.query;
   if (!q) return reply.status(400).send({ error: "q is required" });
@@ -990,7 +1032,8 @@ app.get<{ Querystring: { q?: string } }>("/tmdb/search", async (req, reply) => {
 });
 
 app.get<{ Querystring: { id?: string; type?: string } }>("/tmdb/details", async (req, reply) => {
-  const token = getTmdbToken();
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const token = getTmdbToken(user.pubKey);
   if (!token) return reply.status(503).send({ error: "TMDB not configured — add Read Access Token in Settings" });
   const { id, type } = req.query;
   if (!id || !type) return reply.status(400).send({ error: "id and type are required" });
@@ -1016,7 +1059,8 @@ app.get<{ Querystring: { id?: string; type?: string } }>("/tmdb/details", async 
 import { PlexClient } from "../plex/client.js";
 
 function getPlexClient(): PlexClient | null {
-  const providers = getProvidersLocal();
+  const ownerKey = getOwnerPubKey();
+  const providers = ownerKey ? getProvidersForUser(ownerKey) : [];
   const plex = providers.find(p => p.provider_id === "plex" && p.enabled);
   if (!plex) return null;
   const url = plex.config.server_url as string;
@@ -1066,7 +1110,7 @@ app.post<{
 
   const results: Array<{ title: string; mediaNodeId: string; action: string }> = [];
   const failures: Array<{ title: string; error: string }> = [];
-  const tmdbToken = getTmdbToken();
+  const tmdbToken = getTmdbToken(getOwnerPubKey() ?? "");
 
   for (const item of items) {
     try {
@@ -1341,7 +1385,8 @@ app.get<{ Params: { jobId: string } }>("/pvfs/scan/job/:jobId", async (req, repl
 app.post<{ Body: { items: Array<{ title: string; year: number | null; kind: "movie" | "series" | "unknown" }>; threshold?: number } }>(
   "/media/match/search",
   async (req, reply) => {
-    const token = getTmdbToken();
+    const matchUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    const token = getTmdbToken(matchUser.pubKey);
     if (!token) return reply.status(503).send({ error: "TMDB not configured" });
     const { items, threshold = 0.8 } = req.body;
     if (!Array.isArray(items) || items.length === 0) return reply.status(400).send({ error: "items array is required" });

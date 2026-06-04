@@ -51,7 +51,7 @@ Go to Settings → Plex Media Server and enter your Plex server URL and token. T
 - Passwords are stored as `argon2id` hashes. Password login is non-destructive — it issues a session token without touching your identity key.
 - The first user to register becomes the owner.
 - Sessions expire after 24 hours.
-- Watchlists are per-user. The media library (titles, files, sources) is shared across all users.
+- Watchlists, home page sections, and provider configs (e.g. TMDB API key) are per-user. The media library (titles, files, sources) and libraries are shared across all users. Plex integration is server-level (owner only).
 
 ## Deployment
 

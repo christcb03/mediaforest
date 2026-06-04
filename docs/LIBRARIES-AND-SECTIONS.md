@@ -128,53 +128,21 @@ Each section on the home page is an independent view with:
 - A filter: any combination of `library`, `genre`, `watchStatus`, `kind`, `available`
 - An optional sort: `addedAt` (default), `year`, `title`
 
-Sections are stored in `server_key.json` under `sections`:
+Sections are stored **per user** in `server_key.json` under `userSettings[pubKey].sections`.
+Each user has an independent layout that does not affect other users.
 
-```json
-"sections": [
-  {
-    "id": "continue",
-    "name": "Continue Watching",
-    "view": "row",
-    "filter": { "watchStatus": "watching" },
-    "sort": "addedAt"
-  },
-  {
-    "id": "movies-lib",
-    "name": "Movies",
-    "view": "grid",
-    "filter": { "library": "movies" },
-    "sort": "title"
-  },
-  {
-    "id": "tv-lib",
-    "name": "TV Shows",
-    "view": "grid",
-    "filter": { "library": "tv" },
-    "sort": "title"
-  },
-  {
-    "id": "new",
-    "name": "Recently Added",
-    "view": "row",
-    "filter": {},
-    "sort": "addedAt"
-  }
-]
-```
-
-Default sections are created automatically when the server first starts (or when no
-sections are configured).  Default sections are derived from defined libraries.
+Default sections are generated automatically for users who have not customized their layout,
+derived from the server's defined libraries.
 
 ### Server endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | /config/sections | Bearer | List sections in display order |
-| POST | /config/sections | Bearer (owner) | Create a section |
-| PATCH | /config/sections/:id | Bearer (owner) | Update title/view/filter/sort |
-| DELETE | /config/sections/:id | Bearer (owner) | Remove a section |
-| POST | /config/sections/reorder | Bearer (owner) | Reorder (body: `{ ids: string[] }`) |
+| GET | /config/sections | Bearer | List the requesting user's sections in display order |
+| POST | /config/sections | Bearer (any) | Create a section for the requesting user |
+| PATCH | /config/sections/:id | Bearer (any) | Update title/view/filter/sort |
+| DELETE | /config/sections/:id | Bearer (any) | Remove a section |
+| POST | /config/sections/reorder | Bearer (any) | Reorder (body: `{ ids: string[] }`) |
 
 ### Client: main page
 
@@ -218,6 +186,14 @@ Section view mode (row/grid) and section filters are configurable from Settings.
 - [x] Main page section renderer (row + grid modes)
 - [x] Search collapses to flat list
 
+### Phase E — per-user settings
+- [x] Sections moved to per-user storage (`userSettings[pubKey].sections`)
+- [x] Providers (TMDB key, etc.) moved to per-user storage (`userSettings[pubKey].providers`)
+- [x] Migration: existing root-level `providers`/`sections` moved to owner's entry on startup
+- [x] Section CRUD endpoints now scoped to the requesting user (no longer owner-only)
+- [x] TMDB search/details/import use the requesting user's configured API key
+- [x] Plex and Plex-import remain server-level (owner's config only)
+
 ### Phase D — import staging (next session)
 - [ ] `staged_imports.json` persistence
 - [ ] `/import/stage` and `/import/commit/:id` endpoints
@@ -228,13 +204,10 @@ Section view mode (row/grid) and section filters are configurable from Settings.
 
 ## Open Questions
 
-1. **Per-user libraries?** Currently libraries are server-global. Should members be
-   able to have private libraries visible only to them? Probably yes, long-term —
-   would require `owner: pubKey` on the library def and section filter.
+1. **Per-user libraries?** Currently libraries are server-global (owner-managed). Should
+   members be able to have private libraries visible only to them? Would require `owner: pubKey`
+   on the library def and section filter support.
 
 2. **Library for crosslinked content?** When you add a friend's content via crosslink,
    should you be able to tag it to your own library?  Makes sense — the crosslink
    payload could carry `library`.
-
-3. **Section visibility per user?** Should members see different sections than the owner?
-   Likely out of scope for now; all sections are server-global.
