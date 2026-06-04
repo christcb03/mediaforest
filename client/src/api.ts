@@ -293,6 +293,10 @@ export const api = {
     postPublic<{ token: string; identity: string; userPubKey: string; userRole: 'owner' | 'member'; userName: string | null }>(
       '/auth/recover', { recoveryPassword, newPubKey }
     ),
+  loginWithPassword: (password: string) =>
+    postPublic<{ token: string; identity: string; userPubKey: string; userRole: 'owner' | 'member'; userName: string | null }>(
+      '/auth/login-password', { password }
+    ),
   createInvite: () => post<{ token: string; expiresAt: number }>('/auth/invite', {}),
   listUsers: () => get<{ users: UserRecord[] }>('/auth/users'),
   removeUser: (pubKey: string) => del<{ removed: boolean }>(`/auth/users/${pubKey}`),

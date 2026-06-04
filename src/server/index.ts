@@ -37,7 +37,7 @@ const HOST              = process.env.MF_HOST              ?? "0.0.0.0";
 const LOG_LEVEL         = process.env.MF_LOG_LEVEL         ?? "info";
 const PV_URL            = process.env.MF_PV_URL            ?? "http://localhost:8081";
 const MEDIA_DIR         = process.env.MF_MEDIA_DIR         ?? "";
-const OPEN_REGISTRATION_ENV = process.env.MF_OPEN_REGISTRATION === "true";
+const FORCE_CLOSED_REGISTRATION = process.env.MF_OPEN_REGISTRATION === "false";
 
 // ── Server key + user registry ─────────────────────────────────────────────
 
@@ -140,8 +140,9 @@ function saveInvites(invites: InviteToken[]): void {
 
 const serverKey = loadOrCreateServerKey();
 
-// registrationMode: persisted in server_key.json; env var sets initial default when not persisted
-let registrationMode: "open" | "closed" = serverKey.registrationMode ?? (OPEN_REGISTRATION_ENV ? "open" : "closed");
+// registrationMode: persisted in server_key.json; defaults to "open" (anyone can register)
+// Set MF_OPEN_REGISTRATION=false to force closed regardless of stored setting
+let registrationMode: "open" | "closed" = serverKey.registrationMode ?? (FORCE_CLOSED_REGISTRATION ? "closed" : "open");
 
 const privKeyHex = serverKey.identityPrivKey;
 const identity = identityFromPrivKey(privKeyHex);
@@ -175,10 +176,10 @@ const PUBLIC_ROUTES = new Set(["/health"]);
 const API_PREFIXES = [
   "/search", "/media", "/storage", "/crosslink", "/watchlist",
   "/follow", "/following", "/identity", "/auth", "/tmdb",
-  "/pvfs", "/config", "/stream", "/libraries",
+  "/pvfs", "/config", "/stream", "/libraries", "/plex",
 ];
 // Auth sub-routes that are public (no Bearer token required)
-const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/recover"]);
+const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/recover", "/auth/login-password"]);
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
@@ -369,6 +370,37 @@ app.post<{ Body: { recoveryPassword?: string; newPubKey?: string } }>("/auth/rec
     userPubKey: newPubKey,
     userRole: updatedUser.role,
     userName: updatedUser.name ?? null,
+  };
+});
+
+// Non-destructive password login: verifies recovery password hash, issues session WITHOUT rotating key
+app.post<{ Body: { password?: string } }>("/auth/login-password", async (req, reply) => {
+  const { password } = req.body ?? {};
+  if (!password) return reply.status(400).send({ error: "password is required" });
+  if (usersMap.size === 0) return reply.status(401).send({ error: "server not configured" });
+
+  let matchedUser: UserRecord | null = null;
+  for (const user of usersMap.values()) {
+    if (!user.recoveryPasswordHash) continue;
+    try {
+      if (await argon2.verify(user.recoveryPasswordHash, password)) {
+        matchedUser = user;
+        break;
+      }
+    } catch { continue; }
+  }
+
+  if (!matchedUser) {
+    await new Promise(r => setTimeout(r, 200)); // timing-safe delay
+    return reply.status(401).send({ error: "invalid password" });
+  }
+
+  return {
+    token: issueSession(matchedUser.pubKey),
+    identity: pubKeyHex,
+    userPubKey: matchedUser.pubKey,
+    userRole: matchedUser.role,
+    userName: matchedUser.name ?? null,
   };
 });
 

@@ -322,8 +322,8 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                   <div className="text-sm font-medium text-white">Registration Mode</div>
                   <div className="text-xs text-gray-500 mt-0.5">
                     {authConfig.registrationMode === 'open'
-                      ? 'Anyone can register — no invite required.'
-                      : 'Registration requires an invite token from you.'}
+                      ? 'Open mode: anyone can create an account on this server. They only see what you share — never your config or private library.'
+                      : 'Closed mode: new registrations require an invite token from you.'}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
