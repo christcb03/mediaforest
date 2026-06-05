@@ -171,21 +171,21 @@ export function scanVideoFiles(
 // Async version for large/network-mounted libraries. Yields control between
 // each directory so the event loop isn't blocked while waiting on NFS I/O.
 // onFile fires for every discovered file — use it to stream results to a job
-// object without waiting for the full scan to finish.
+// object without waiting for the full scan to finish. Return false to stop walking.
 export async function scanVideoFilesAsync(
   dir: string,
   extensions: Set<string> = DEFAULT_VIDEO_EXTENSIONS,
   onProgress?: (found: number) => void,
-  onFile?: (file: ScannedFile) => void,
+  onFile?: (file: ScannedFile) => boolean | void,
 ): Promise<ScannedFile[]> {
   const results: ScannedFile[] = []
 
-  async function walk(current: string) {
+  async function walk(current: string): Promise<boolean> {
     let entries: string[]
     try {
       entries = await readdir(current)
     } catch {
-      return
+      return false
     }
     for (const entry of entries) {
       const fullPath = path.join(current, entry)
@@ -196,18 +196,19 @@ export async function scanVideoFilesAsync(
         continue
       }
       if (st.isDirectory()) {
-        await walk(fullPath)
+        if (await walk(fullPath)) return true
       } else if (st.isFile()) {
         const ext = path.extname(entry).toLowerCase()
         if (extensions.has(ext)) {
           const parsed = parseMediaPath(fullPath)
           const file: ScannedFile = { path: fullPath, size_bytes: st.size, ext, parsed, local_artwork: findLocalArtwork(fullPath, parsed.title) }
           results.push(file)
-          onFile?.(file)
+          if (onFile?.(file) === false) return true
           if (onProgress && results.length % 50 === 0) onProgress(results.length)
         }
       }
     }
+    return false
   }
 
   await walk(dir)

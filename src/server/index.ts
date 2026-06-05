@@ -1297,7 +1297,7 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
         if (dry_run) {
           let count = 0;
           await scanVideoFilesAsync(dirPath, extSet, undefined, (file) => {
-            if (limit && count >= limit) return;
+            if (limit && count >= limit) return false;
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
             (job.files as typeof file[]).push(file);
             count++;

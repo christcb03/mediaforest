@@ -118,8 +118,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     [scanFiles, detectedKind],
   )
   const movies = useMemo(() =>
-    scanFiles.filter(f => f.parsed.kind === 'movie'),
-    [scanFiles],
+    scanFiles.filter(
+      f => f.parsed.kind === 'movie'
+        || (f.parsed.kind === 'unknown' && detectedKind === 'movie'),
+    ),
+    [scanFiles, detectedKind],
   )
 
   // Uncertain-only filter: shows/movies with unconfirmed low-confidence matches
@@ -294,11 +297,12 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   }
 
   // Called incrementally with each new batch of files — merges into existing selection.
-  function autoSelectNew(newFiles: ScannedFile[]) {
+  const autoSelectNew = useCallback((newFiles: ScannedFile[]) => {
     setSelectedShows(prev => {
       const next = new Map(prev)
       for (const f of newFiles) {
-        if (f.already_ingested || f.parsed.kind !== 'series') continue
+        if (f.already_ingested) continue
+        if (f.parsed.kind !== 'series' && !(f.parsed.kind === 'unknown' && detectedKind === 'series')) continue
         const sn = f.parsed.season ?? 0
         if (!next.has(f.parsed.title)) next.set(f.parsed.title, new Set())
         next.get(f.parsed.title)!.add(sn)
@@ -308,11 +312,14 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setSelectedMovies(prev => {
       const next = new Set(prev)
       for (const f of newFiles) {
-        if (!f.already_ingested && f.parsed.kind === 'movie') next.add(f.path)
+        if (f.already_ingested) continue
+        if (f.parsed.kind === 'movie' || (f.parsed.kind === 'unknown' && detectedKind === 'movie')) {
+          next.add(f.path)
+        }
       }
       return next
     })
-  }
+  }, [detectedKind])
 
 
   // ── Override search ────────────────────────────────────────────────────────
@@ -573,21 +580,23 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             disabled={phase !== 'idle' && phase !== 'ready'}
             className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 font-mono disabled:opacity-50"
           />
-          <input
-            type="number"
-            value={limit}
-            onChange={e => setLimit(e.target.value)}
-            placeholder="Limit"
-            title="Max files"
-            disabled={phase !== 'idle' && phase !== 'ready'}
-            className="w-24 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
-          />
+          <label className="flex flex-col gap-0.5 shrink-0" title="Maximum video files to collect from the scan (default 5000)">
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide text-center">Max files</span>
+            <input
+              type="number"
+              value={limit}
+              onChange={e => setLimit(e.target.value)}
+              min={1}
+              disabled={phase !== 'idle' && phase !== 'ready'}
+              className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
+            />
+          </label>
           {libraries.length > 0 && (
             <select
               value={selectedLibrary}
               onChange={e => setSelectedLibrary(e.target.value)}
               disabled={phase === 'importing'}
-              title="Target library"
+              title="Library label stored on imported titles (does not choose the scan folder — use the path field)"
               className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50"
             >
               <option value="">No library</option>
@@ -795,6 +804,23 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             {showUncertainOnly && visibleShows.length === 0 && visibleMovies.length === 0 && (
               <div className="text-center text-gray-500 py-12 text-sm">
                 All matches confirmed — nothing needs review.
+              </div>
+            )}
+
+            {phase === 'ready' && scanFiles.length === 0 && (
+              <div className="text-center text-gray-500 py-12 text-sm space-y-2">
+                <p>No video files found under <span className="font-mono text-gray-400">{dirPath}</span>.</p>
+                <p className="text-xs">Check the path matches the container mount (usually <span className="font-mono">/media/…</span>) and that files use a supported extension (.mkv, .mp4, …).</p>
+              </div>
+            )}
+
+            {phase === 'ready' && scanFiles.length > 0 && visibleShows.length === 0 && visibleMovies.length === 0 && !showUncertainOnly && (
+              <div className="text-center text-gray-500 py-12 text-sm space-y-2">
+                <p>Found {scanFiles.length} file{scanFiles.length === 1 ? '' : 's'} but none appear as Movies or TV in the list.</p>
+                <p className="text-xs">
+                  {newCount} new · {alreadyCount} already in PhraseVault.
+                  {' '}Try filenames like <span className="font-mono">Title (2024).mkv</span> or <span className="font-mono">Show - S01E01.mkv</span>.
+                </p>
               </div>
             )}
           </div>
