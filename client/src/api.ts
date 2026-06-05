@@ -15,6 +15,13 @@ function apiErrorMessage(
   status: number,
   statusText: string,
 ): string {
+  if (status === 524) {
+    return 'Gateway timeout (524): reverse proxy gave up waiting for MediaForest. '
+      + 'Try a smaller subfolder, check server logs (docker logs), or increase proxy timeout.';
+  }
+  if (status === 502 || status === 503) {
+    return `Upstream error (${status}): MediaForest may be restarting or overloaded. Retry in a moment.`;
+  }
   if (!body) return `${status} ${statusText}`;
   const msg = body.message?.trim();
   const err = body.error?.trim();
@@ -393,7 +400,7 @@ export const api = {
   pvfsUnimported: () => get<{ files: UnimportedFile[] }>('/pvfs/unimported'),
   pvfsScan: (body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number; library?: string }) =>
     post<{ jobId: string; resumed?: number }>('/pvfs/scan', body),
-  pvfsScanJob: (jobId: string) =>
+  pvfsScanJob: (jobId: string, since = 0) =>
     get<{
       status: 'running' | 'done' | 'error';
       phase?: 'indexing' | 'walking';
@@ -406,15 +413,18 @@ export const api = {
       already_ingested_count?: number;
       resumed_from_session?: number;
       dry_run: boolean;
+      files_total: number;
       files: ScannedFile[];
       ingested?: number;
       failed?: number;
       failures?: Array<{ path: string; error: string }>;
       error?: string;
       index_warning?: string;
-    }>(`/pvfs/scan/job/${jobId}`),
+      log?: Array<{ t: number; msg: string }>;
+      last_log?: string;
+    }>(`/pvfs/scan/job/${jobId}?since=${since}`),
   pvfsScanDiagnose: (path: string) =>
-    get<{ exists: boolean; path: string; sample?: Array<{ name: string; type: string }>; totalEntries?: number; error?: string }>(
+    get<{ exists: boolean; path: string }>(
       `/pvfs/scan/diagnose?path=${encodeURIComponent(path)}`,
     ),
   getScanSession: (path: string) =>

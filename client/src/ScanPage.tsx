@@ -83,6 +83,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [alreadyCount, setAlreadyCount] = useState(0)
   const [error, setError] = useState('')
   const [scanNotice, setScanNotice] = useState('')
+  const [scanJobId, setScanJobId] = useState('')
+  const [scanLogs, setScanLogs] = useState<Array<{ t: number; msg: string }>>([])
+  const pollFailRef = useRef(0)
   const [matchError, setMatchError] = useState('')
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
   const [stagedBatches, setStagedBatches] = useState<StagedBatchSummary[]>([])
@@ -265,8 +268,15 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   }
 
   async function handleScan() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+    pollFailRef.current = 0
     setError('')
     setScanNotice('')
+    setScanJobId('')
+    setScanLogs([])
     setScanFiles([])
     setSelectedShows(new Map())
     setSelectedMovies(new Set())
@@ -285,12 +295,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     pendingMatchRef.current = []
     matchInFlightRef.current = false
     try {
-      const diag = await api.pvfsScanDiagnose(dirPath)
-      if (!diag.exists) {
-        setError(`Folder not visible inside MediaForest: ${dirPath}. Use a path under /media (see Settings library default paths).`)
-        setPhase('idle')
-        return
-      }
+      void api.pvfsScanDiagnose(dirPath).then(diag => {
+        if (!diag.exists) {
+          setScanNotice(`Warning: ${dirPath} not found inside the container — scan may fail. Use /media/…`)
+        }
+      }).catch(() => {})
 
       const maxNew = parseInt(limit, 10)
       const { jobId, resumed } = await api.pvfsScan({
@@ -299,24 +308,29 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         limit: Number.isFinite(maxNew) && maxNew > 0 ? maxNew : undefined,
         library: selectedLibrary || undefined,
       })
+      setScanJobId(jobId)
       if (resumed && resumed > 0) setResumedCount(resumed)
 
-      let lastFileCount = 0
+      let filesTotal = 0
       const tick = async () => {
         try {
-          const res = await api.pvfsScanJob(jobId)
+          const res = await api.pvfsScanJob(jobId, filesTotal)
+          pollFailRef.current = 0
           setScanPhase(res.phase ?? (res.status === 'running' ? 'walking' : null))
           setFilesSeen(res.files_seen ?? res.found ?? 0)
           setDirsScanned(res.dirs_scanned ?? 0)
           setNewFound(res.new_count ?? res.found ?? 0)
           setCurrentDir(res.current_dir ?? '')
+          if (res.log?.length) setScanLogs(res.log)
+          if (res.last_log) console.info('[scan]', res.last_log)
 
-          if (res.files.length > lastFileCount) {
-            const newFiles = res.files.slice(lastFileCount)
-            lastFileCount = res.files.length
-            setScanFiles(res.files)
-            autoSelectNew(newFiles)
-            queueNewTitlesForMatching(newFiles)
+          if (res.files.length > 0) {
+            setScanFiles(prev => [...prev, ...res.files])
+            autoSelectNew(res.files)
+            queueNewTitlesForMatching(res.files)
+            filesTotal = res.files_total
+          } else if (res.files_total > filesTotal) {
+            filesTotal = res.files_total
           }
 
           if (res.index_warning) setScanNotice(res.index_warning)
@@ -325,25 +339,34 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             if (pollRef.current) clearInterval(pollRef.current)
             pollRef.current = null
             if (res.status === 'error') {
-              setError(res.error ?? 'Scan failed')
+              setError(res.error ?? res.last_log ?? 'Scan failed')
               setPhase('idle')
             } else {
-              setNewCount(res.new_count ?? res.files.filter(f => !f.already_ingested).length)
-              setAlreadyCount(res.already_ingested_count ?? res.files.filter(f => f.already_ingested).length)
+              setNewCount(res.new_count ?? 0)
+              setAlreadyCount(res.already_ingested_count ?? 0)
               setPhase('ready')
               loadStaged()
             }
           }
         } catch (e) {
-          if (pollRef.current) clearInterval(pollRef.current)
-          pollRef.current = null
-          if (e instanceof UnauthorizedError) onUnauthorized()
-          else setError(e instanceof Error ? e.message : 'Poll failed')
-          setPhase('idle')
+          pollFailRef.current += 1
+          if (e instanceof UnauthorizedError) {
+            if (pollRef.current) clearInterval(pollRef.current)
+            onUnauthorized()
+            return
+          }
+          const msg = e instanceof Error ? e.message : 'Poll failed'
+          console.warn('[scan] poll error', pollFailRef.current, msg)
+          if (pollFailRef.current >= 10) {
+            if (pollRef.current) clearInterval(pollRef.current)
+            pollRef.current = null
+            setError(msg)
+            setPhase('idle')
+          }
         }
       }
       await tick()
-      pollRef.current = setInterval(tick, 500)
+      pollRef.current = setInterval(tick, 1000)
     } catch (e) {
       setPhase('idle')
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
@@ -776,6 +799,25 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           <p className="text-amber-300/90 text-sm mb-4">{scanNotice}</p>
         )}
         {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
+
+        {(phase === 'scanning' || scanLogs.length > 0) && (
+          <details className="mb-4 text-xs text-gray-500" open={phase === 'scanning'}>
+            <summary className="cursor-pointer text-gray-400 hover:text-gray-300">
+              Scan log {scanJobId && <span className="font-mono text-gray-600">({scanJobId.slice(0, 8)}…)</span>}
+            </summary>
+            <ul className="mt-2 max-h-32 overflow-y-auto font-mono space-y-0.5 bg-gray-900/80 rounded p-2 border border-gray-800">
+              {scanLogs.length === 0 ? (
+                <li className="text-gray-600">Waiting for server…</li>
+              ) : scanLogs.map((line, i) => (
+                <li key={i}>
+                  <span className="text-gray-600">{new Date(line.t).toLocaleTimeString()}</span>
+                  {' '}{line.msg}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-gray-600">Server: <code className="text-gray-500">docker logs &lt;mediaforest&gt;</code> for full detail (jobId in log).</p>
+          </details>
+        )}
 
         {matchError && (
           <div className="mb-4 px-4 py-3 rounded-lg bg-yellow-950 border border-yellow-800 text-sm text-yellow-300 flex items-start gap-2">

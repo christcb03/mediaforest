@@ -27,6 +27,7 @@ import {
 import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync, findLocalArtwork } from "../scan/scan.js";
 import { startScanWatchdog } from "../scan/scan-watchdog.js";
+import { appendScanJobLog } from "../scan/scan-job-log.js";
 import { scoreCandidates } from "../scan/matcher.js";
 import { runBatchImport } from "../import/batch-import.js";
 import type { ImportItemBody } from "../import/types.js";
@@ -1326,8 +1327,37 @@ interface ScanJob {
   failures?: Array<{ path: string; error: string }>;
   error?: string;
   index_warning?: string;
+  log?: import("../scan/scan-job-log.js").ScanJobLogEntry[];
+  last_log?: string;
 }
 const scanJobs = new Map<string, ScanJob>();
+
+function serializeScanJobPoll(job: ScanJob, since: number) {
+  const allFiles = job.files as ScannedFile[];
+  return {
+    status: job.status,
+    startedAt: job.startedAt,
+    dry_run: job.dry_run,
+    phase: job.phase,
+    files_seen: job.files_seen,
+    dirs_scanned: job.dirs_scanned,
+    entries_scanned: job.entries_scanned,
+    current_dir: job.current_dir,
+    found: job.found,
+    new_count: job.new_count,
+    already_ingested_count: job.already_ingested_count,
+    resumed_from_session: job.resumed_from_session,
+    files_total: allFiles.length,
+    files: allFiles.slice(since),
+    ingested: job.ingested,
+    failed: job.failed,
+    failures: job.failures,
+    error: job.error,
+    index_warning: job.index_warning,
+    log: job.log?.slice(-30) ?? [],
+    last_log: job.last_log,
+  };
+}
 
 function persistScanProgress(job: ScanJob, stagedBy: string): void {
   const files = job.files as ScannedFile[];
@@ -1395,20 +1425,36 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
       : undefined;
 
     const maxNew = limit && limit > 0 ? limit : undefined;
+    const scanLog = req.log.child({ jobId, scanPath: dirPath });
+    appendScanJobLog(job, "scan accepted", { limit: maxNew, resume: initialFiles.length, dry_run });
+    scanLog.info({ limit: maxNew, resume: initialFiles.length }, "scan job accepted");
     let lastPersist = 0;
+    let lastProgressLog = 0;
 
     const watchdog = startScanWatchdog(job, (msg) => {
       job.error = msg;
       job.status = "error";
+      appendScanJobLog(job, "scan aborted", { reason: msg });
+      scanLog.warn({ reason: msg }, "scan job aborted");
     });
 
     ;(async () => {
       try {
+        appendScanJobLog(job, "filesystem walk starting");
+        scanLog.info("filesystem walk starting");
+
         // Load PV dedup index in parallel — never block the filesystem walk on it.
         let ingestedUris = new Set<string>();
         void pv.getIngestedUriSet(8_000).then((s) => {
           ingestedUris = s;
-        }).catch(() => {});
+          appendScanJobLog(job, "phrasevault dedup index loaded", { uris: s.size });
+          scanLog.info({ uris: s.size }, "phrasevault dedup index loaded");
+        }).catch((err) => {
+          appendScanJobLog(job, "phrasevault dedup index skipped", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          scanLog.warn({ err }, "phrasevault dedup index skipped");
+        });
 
         if (watchdog.isAborted()) return;
 
@@ -1425,6 +1471,13 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
             job.dirs_scanned = p.dirsScanned;
             job.entries_scanned = p.entriesScanned;
             job.current_dir = p.currentDir;
+            const now = Date.now();
+            if (now - lastProgressLog > 5000) {
+              lastProgressLog = now;
+              const msg = `${p.dirsScanned} folders, ${p.videoFilesSeen} videos, ${newCount} new`;
+              appendScanJobLog(job, msg, { dir: p.currentDir });
+              scanLog.info({ ...p, newCount }, "scan progress");
+            }
           }, (file) => {
             if (watchdog.isAborted()) return false;
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
@@ -1433,7 +1486,11 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
               return;
             }
             if (sessionSkip.has(file.path)) return;
-            if (maxNew && newCount >= maxNew) return false;
+            if (maxNew && newCount >= maxNew) {
+              appendScanJobLog(job, `reached max new files (${maxNew})`);
+              scanLog.info({ maxNew }, "scan reached max new files");
+              return false;
+            }
             (job.files as ScannedFile[]).push(file);
             sessionSkip.add(file.path);
             newCount++;
@@ -1451,6 +1508,15 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
           if (!watchdog.isAborted()) {
             job.status = "done";
             job.phase = undefined;
+            appendScanJobLog(job, "scan finished", {
+              new_count: job.new_count,
+              files_seen: job.files_seen,
+              dirs: job.dirs_scanned,
+            });
+            scanLog.info(
+              { new_count: job.new_count, files_seen: job.files_seen },
+              "scan job finished",
+            );
             persistScanProgress(job, scanUser.pubKey);
           }
           return;
@@ -1485,8 +1551,11 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
         job.status = "done";
       } catch (err) {
         if (job.status !== "error") {
-          job.error = err instanceof Error ? err.message : "scan failed";
+          const message = err instanceof Error ? err.message : "scan failed";
+          job.error = message;
           job.status = "error";
+          appendScanJobLog(job, "scan error", { error: message });
+          scanLog.error({ err }, "scan job error");
         }
       } finally {
         watchdog.stop();
@@ -1497,35 +1566,23 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
   },
 );
 
-app.get<{ Params: { jobId: string } }>("/pvfs/scan/job/:jobId", async (req, reply) => {
-  const job = scanJobs.get(req.params.jobId);
-  if (!job) return reply.status(404).send({ error: "job not found" });
-  return reply.send(job);
-});
+app.get<{ Params: { jobId: string }; Querystring: { since?: string } }>(
+  "/pvfs/scan/job/:jobId",
+  async (req, reply) => {
+    const job = scanJobs.get(req.params.jobId);
+    if (!job) return reply.status(404).send({ error: "job not found (server may have restarted)" });
+    const since = Math.max(0, parseInt(req.query.since ?? "0", 10) || 0);
+    return reply.send(serializeScanJobPoll(job, since));
+  },
+);
 
-/** Quick path check (lists one directory level). */
+/** Fast path check — exists only (no directory listing; avoids proxy timeouts). */
 app.get<{ Querystring: { path?: string } }>("/pvfs/scan/diagnose", async (req, reply) => {
   const dirPath = req.query.path;
   if (!dirPath) return reply.status(400).send({ error: "path query is required" });
-  if (!existsSync(dirPath)) {
-    return reply.send({ exists: false, path: dirPath, sample: [] as string[] });
-  }
-  try {
-    const { readdir } = await import("node:fs/promises");
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    const sample = entries.slice(0, 12).map(e => ({
-      name: e.name,
-      type: e.isDirectory() ? "dir" : "file",
-    }));
-    return reply.send({ exists: true, path: dirPath, sample, totalEntries: entries.length });
-  } catch (err) {
-    return reply.send({
-      exists: true,
-      path: dirPath,
-      error: err instanceof Error ? err.message : String(err),
-      sample: [] as string[],
-    });
-  }
+  const exists = existsSync(dirPath);
+  req.log.info({ path: dirPath, exists }, "scan diagnose");
+  return reply.send({ exists, path: dirPath });
 });
 
 // ── PVFS unimported files ─────────────────────────────────────────────────
