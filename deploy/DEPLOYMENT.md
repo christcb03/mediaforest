@@ -70,6 +70,24 @@ The owner can wipe **all server metadata** from the MediaForest UI (Settings). T
 
 See [docs/FACTORY-RESET.md](../docs/FACTORY-RESET.md) and [PhraseVault docs/ADMIN-FACTORY-RESET.md](https://github.com/christcb03/phrasevault/blob/main/docs/ADMIN-FACTORY-RESET.md).
 
+## Watchtower update failed (zombie process)
+
+If Telegram reports **MediaForest update failed** but GitHub Actions succeeded, check Watchtower logs:
+
+```bash
+docker logs watchtower-phrasevault --tail 20
+```
+
+Common error: `PID … is zombie and can not be killed` — the Node process did not exit cleanly on SIGTERM. Fix:
+
+```bash
+cd /home/chris/mediaforest
+docker rm -f mediaforest
+docker compose pull && docker compose up -d
+```
+
+Ensure `docker-compose.yml` includes `init: true` under the `mediaforest` service (see `deploy/docker-compose.mediaforest.yml`).
+
 ## Manual Re-deploy
 
 ```bash

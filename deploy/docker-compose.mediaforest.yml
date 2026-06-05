@@ -3,6 +3,8 @@ services:
     image: ghcr.io/christcb03/mediaforest:latest
     container_name: mediaforest
     restart: unless-stopped
+    # Reap zombies so Watchtower can SIGTERM/replace the container cleanly.
+    init: true
     volumes:
       - ./data:/data
       - /mnt/unionfs/Media:/media:ro
