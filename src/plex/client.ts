@@ -45,16 +45,26 @@ export class PlexClient {
     this.token = token;
   }
 
-  private async get<T>(path: string, params: Record<string, string> = {}): Promise<T> {
+  private async get<T>(path: string, params: Record<string, string> = {}, timeoutMs = 30_000): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
     url.searchParams.set("X-Plex-Token", this.token);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
-    const res = await fetch(url.toString(), {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(`Plex API ${res.status}: ${path}`);
-    return res.json() as Promise<T>;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url.toString(), {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`Plex API ${res.status}: ${path}`);
+      return res.json() as Promise<T>;
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") throw new Error(`Plex API timeout after ${timeoutMs}ms: ${path}`);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async ping(): Promise<{ version: string }> {

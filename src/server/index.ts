@@ -1112,19 +1112,20 @@ app.post<{
   const failures: Array<{ title: string; error: string }> = [];
   const tmdbToken = getTmdbToken(getOwnerPubKey() ?? "");
 
+  // Build dedup indexes once rather than calling engine.search({}) per item
+  const existingMedia = engine.search({});
+  const byTmdbId = new Map(existingMedia.filter(r => r.media.payload.tmdb_id).map(r => [r.media.payload.tmdb_id, r.media.id]));
+  const byTitleYear = new Map(existingMedia.map(r => [`${r.media.payload.title}::${r.media.payload.year}`, r.media.id]));
+
   for (const item of items) {
     try {
       // 1. Dedup: find existing media node by tmdb_id or title+year
       let mediaNodeId: string | null = null;
       if (item.tmdbId) {
-        const existing = engine.search({}).find(r => r.media.payload.tmdb_id === item.tmdbId);
-        if (existing) mediaNodeId = existing.media.id;
+        mediaNodeId = byTmdbId.get(item.tmdbId) ?? null;
       }
       if (!mediaNodeId) {
-        const existing = engine.search({}).find(r =>
-          r.media.payload.title === item.title && r.media.payload.year === item.year
-        );
-        if (existing) mediaNodeId = existing.media.id;
+        mediaNodeId = byTitleYear.get(`${item.title}::${item.year}`) ?? null;
       }
 
       let action = "skipped";
