@@ -23,6 +23,44 @@ function hashChallenge(nonce: string): Uint8Array {
   return blake3(concat(DOMAIN_CHALLENGE, new TextEncoder().encode(nonce)));
 }
 
+export interface PvfsIngestResult {
+  fileNodeId: string;
+  contentHash: string;
+  streamUrl: string;
+}
+
+export interface PvfsFileResponse {
+  node: {
+    id: string;
+    label: string;
+    payload: {
+      content_hash: string;
+      size_bytes: number;
+      mime_type: string;
+      original_filename: string | null;
+    };
+  };
+  locations: Array<{ payload: { uri: string; type: string } }>;
+  stream_url: string;
+}
+
+export interface PvfsScanJobResponse {
+  id: string;
+  status: "running" | "done" | "error";
+  startedAt: number;
+  finishedAt?: number;
+  dry_run: boolean;
+  root_path: string;
+  found: number;
+  new_count?: number;
+  already_ingested_count?: number;
+  ingested?: number;
+  failed?: number;
+  files: unknown[];
+  failures?: Array<{ path: string; error: string }>;
+  error?: string;
+}
+
 export class PhraseVaultClient {
   private baseUrl: string;
   private privKeyHex: string;
@@ -34,6 +72,10 @@ export class PhraseVaultClient {
     this.privKeyHex = privKeyHex;
     const identity = identityFromPrivKey(privKeyHex);
     this.authPubKeyHex = Buffer.from(identity.publicKey).toString("hex");
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /** Register this server's auth pubkey with PV (idempotent). */
@@ -82,18 +124,20 @@ export class PhraseVaultClient {
     return this.token!;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
     const token = await this.ensureAuth();
+    return { Authorization: `Bearer ${token}`, ...extra };
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: await this.authHeaders(
+        body !== undefined ? { "Content-Type": "application/json" } : {},
+      ),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (res.status === 401) {
-      // Token expired — re-auth once and retry
       this.token = null;
       return this.request<T>(method, path, body);
     }
@@ -101,13 +145,26 @@ export class PhraseVaultClient {
       const text = await res.text();
       throw new Error(`PV ${method} ${path} → ${res.status}: ${text}`);
     }
+    if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
   }
 
   get<T>(path: string) { return this.request<T>("GET", path); }
   post<T>(path: string, body?: unknown) { return this.request<T>("POST", path, body); }
   put<T>(path: string, body?: unknown) { return this.request<T>("PUT", path, body); }
-  delete<T>(path: string) { return this.request<T>("DELETE", path); }
+  delete<T>(path: string, body?: unknown) { return this.request<T>("DELETE", path, body); }
+
+  /** Stream bytes from PVFS (for proxying to browsers). */
+  async fetchPvfsStream(nodeId: string, rangeHeader?: string): Promise<Response> {
+    const headers = await this.authHeaders();
+    if (rangeHeader) headers.Range = rangeHeader;
+    const res = await fetch(`${this.baseUrl}/pvfs/file/${nodeId}/stream`, { headers });
+    if (res.status === 401) {
+      this.token = null;
+      return this.fetchPvfsStream(nodeId, rangeHeader);
+    }
+    return res;
+  }
 
   // ── Forest helpers ─────────────────────────────────────────────────────────
 
@@ -161,12 +218,80 @@ export class PhraseVaultClient {
     return this.put<unknown>(`/config/providers/${providerId}`, data);
   }
 
+  async getTmdbToken(): Promise<string> {
+    try {
+      const providers = await this.getProviders() as Array<{ provider_id: string; config: Record<string, unknown> }>;
+      const tmdb = providers.find(p => p.provider_id === "tmdb");
+      return (tmdb?.config["read_access_token"] as string | undefined) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
   // ── PVFS helpers ───────────────────────────────────────────────────────────
 
   async getPvfsFile(nodeId: string) {
-    return this.get<unknown>(`/pvfs/file/${nodeId}`);
+    return this.get<PvfsFileResponse>(`/pvfs/file/${nodeId}`);
   }
 
+  /** Register a file on the PV host filesystem (path must exist inside PV container). */
+  async ingestPvfsFile(pathOnPvHost: string, opts: {
+    label?: string;
+    mime_type?: string;
+    media_node_id?: string;
+    compute_hash?: boolean;
+  } = {}): Promise<PvfsIngestResult> {
+    return this.post<PvfsIngestResult>("/pvfs/ingest", {
+      path: pathOnPvHost,
+      label: opts.label,
+      mime_type: opts.mime_type,
+      media_node_id: opts.media_node_id,
+    });
+  }
+
+  async locationByUri(uri: string) {
+    const q = encodeURIComponent(uri);
+    return this.get<{ nodes: Array<{ id: string; payload: Record<string, unknown> }> }>(
+      `/pvfs/locations/by-uri?uri=${q}`,
+    );
+  }
+
+  /** All known file:// URIs (for scan dedup). */
+  async getIngestedUriSet(): Promise<Set<string>> {
+    const set = new Set<string>();
+    const resp = await this.get<{ nodes: Array<{ payload: { uri?: string } }> }>("/pvfs/locations");
+    for (const n of resp.nodes ?? []) {
+      if (n.payload?.uri) set.add(n.payload.uri);
+    }
+    return set;
+  }
+
+  async startPvfsScan(body: {
+    path: string;
+    dry_run?: boolean;
+    extensions?: string[];
+    limit?: number;
+    compute_hash?: boolean;
+  }) {
+    return this.post<{ jobId: string }>("/pvfs/scan", body);
+  }
+
+  async getPvfsScanJob(jobId: string) {
+    return this.get<PvfsScanJobResponse>(`/pvfs/scan/${jobId}`);
+  }
+
+  async listPvfsOrphans() {
+    return this.get<{ orphans: unknown[]; count: number }>("/pvfs/orphans");
+  }
+
+  async removeFromPrimary(fileNodeId: string, confirmLocalDelete?: boolean) {
+    return this.delete<unknown>(
+      `/pvfs/trees/primary/files/${fileNodeId}`,
+      confirmLocalDelete ? { confirm_local_delete: true } : undefined,
+    );
+  }
+
+  /** @deprecated Prefer ingestPvfsFile — hashes in MF and duplicates PV work. */
   async createPvfsFile(payload: {
     content_hash: string; size_bytes: number;
     mime_type: string; original_filename?: string; label: string;
@@ -188,15 +313,5 @@ export class PhraseVaultClient {
     return this.post<unknown>(`/pvfs/file/${fileNodeId}/location`, {
       payload: { ...locationPayload, last_verified: null, last_seen: Date.now() },
     });
-  }
-
-  async getTmdbToken(): Promise<string> {
-    try {
-      const providers = await this.getProviders() as Array<{ provider_id: string; config: Record<string, unknown> }>;
-      const tmdb = providers.find(p => p.provider_id === "tmdb");
-      return (tmdb?.config["read_access_token"] as string | undefined) ?? "";
-    } catch {
-      return "";
-    }
   }
 }

@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { createReadStream } from "fs";
+import { Readable } from "node:stream";
 import { extname } from "node:path";
 import { randomBytes } from "crypto";
 
@@ -26,7 +27,6 @@ import {
 import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync } from "../scan/scan.js";
 import { scoreCandidates } from "../scan/matcher.js";
-import { blake3 } from "@noble/hashes/blake3";
 import argon2 from "argon2";
 
 // ── Config from environment ────────────────────────────────────────────────
@@ -1339,13 +1339,9 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
     ;(async () => {
       try {
-        // Get already-ingested URIs from PV
-        const ingestedUris = new Set<string>();
+        let ingestedUris = new Set<string>();
         try {
-          const pvfsLocations = await pv.get<{ nodes: Array<{ payload: { uri: string } }> }>("/pvfs/locations");
-          for (const n of pvfsLocations.nodes ?? []) {
-            if (n.payload?.uri) ingestedUris.add(n.payload.uri);
-          }
+          ingestedUris = await pv.getIngestedUriSet();
         } catch { /* PV not available, proceed without dedup */ }
 
         if (dry_run) {
@@ -1507,47 +1503,24 @@ app.get<{ Querystring: { path: string } }>("/pvfs/artwork", async (req, reply) =
 // ── File streaming (via PV PVFS metadata + local file) ───────────────────
 
 app.get<{ Params: { nodeId: string } }>("/stream/:nodeId", async (req, reply) => {
-  let fileNode: Record<string, unknown>;
-  try {
-    fileNode = await pv.getPvfsFile(req.params.nodeId) as Record<string, unknown>;
-  } catch {
-    return reply.status(404).send({ error: "file node not found" });
-  }
-
-  const node = (fileNode as { node: Record<string, unknown> }).node ?? fileNode;
-  const payload = node.payload as { content_hash: string; size_bytes: number; mime_type: string };
-  const locations = ((fileNode as { locations?: Array<{ payload: { uri: string; type: string } }> }).locations ?? []);
-  const local = locations.find(l => l.payload?.type === "local");
-
-  let filePath: string | null = null;
-  if (local?.payload.uri.startsWith("file://")) {
-    filePath = local.payload.uri.slice("file://".length);
-  }
-  if (!filePath || !existsSync(filePath)) return reply.status(404).send({ error: "file not available locally" });
-
-  const mimeType = payload.mime_type || "application/octet-stream";
-  const totalSize = payload.size_bytes;
   const rangeHeader = req.headers["range"] as string | undefined;
-
-  reply.header("Accept-Ranges", "bytes");
-  reply.header("Content-Type", mimeType);
-
-  if (rangeHeader) {
-    const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
-    if (!match) return reply.status(416).send({ error: "invalid range" });
-    const start = parseInt(match[1], 10);
-    const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
-    if (start >= totalSize || end >= totalSize || start > end) {
-      reply.header("Content-Range", `bytes */${totalSize}`);
-      return reply.status(416).send({ error: "range not satisfiable" });
+  try {
+    const res = await pv.fetchPvfsStream(req.params.nodeId, rangeHeader);
+    if (!res.ok) {
+      const text = await res.text();
+      return reply.status(res.status).send({ error: text || "stream failed" });
     }
-    reply.status(206);
-    reply.header("Content-Range", `bytes ${start}-${end}/${totalSize}`);
-    reply.header("Content-Length", end - start + 1);
-    return reply.send(createReadStream(filePath, { start, end }));
+    for (const h of ["content-type", "content-length", "content-range", "accept-ranges"] as const) {
+      const v = res.headers.get(h);
+      if (v) reply.header(h, v);
+    }
+    reply.status(res.status);
+    if (!res.body) return reply.send();
+    return reply.send(Readable.fromWeb(res.body));
+  } catch (err) {
+    req.log.warn({ err, nodeId: req.params.nodeId }, "PVFS stream proxy failed");
+    return reply.status(502).send({ error: "stream unavailable" });
   }
-  reply.header("Content-Length", totalSize);
-  return reply.send(createReadStream(filePath));
 });
 
 // ── Admin / forest inspector ──────────────────────────────────────────────
@@ -1635,32 +1608,25 @@ app.log.info(`PhraseVault: ${PV_URL}`);
 
 async function ingestFile(filePath: string, opts: { label?: string; mediaNodeId?: string } = {}) {
   const stats = await import("fs/promises").then(fs => fs.stat(filePath));
-  // Stream-hash so large video files don't get loaded into RAM
-  const hasher = blake3.create({});
-  await new Promise<void>((resolve, reject) => {
-    const s = createReadStream(filePath);
-    s.on('data', (chunk: Buffer | string) => hasher.update(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
-    s.on('end', resolve);
-    s.on('error', reject);
-  });
-  const blake3Hash = Buffer.from(hasher.digest()).toString("hex");
   const mime = guessMime(filePath);
+  const label = opts.label ?? path.basename(filePath);
 
-  const fileNode = await pv.createPvfsFile({
-    content_hash: blake3Hash,
-    size_bytes: stats.size,
+  const ingested = await pv.ingestPvfsFile(filePath, {
+    label,
     mime_type: mime,
-    original_filename: path.basename(filePath),
-    label: opts.label ?? path.basename(filePath),
-  }) as { id: string; payload?: Record<string, unknown> };
-
-  await pv.addPvfsLocation(fileNode.id, {
-    type: "local",
-    uri: `file://${filePath}`,
-    label: path.basename(filePath),
+    media_node_id: opts.mediaNodeId,
   });
 
-  return { fileNode: { ...fileNode, payload: { content_hash: blake3Hash, size_bytes: stats.size, mime_type: mime } } };
+  return {
+    fileNode: {
+      id: ingested.fileNodeId,
+      payload: {
+        content_hash: ingested.contentHash,
+        size_bytes: stats.size,
+        mime_type: mime,
+      },
+    },
+  };
 }
 
 function guessEncoding(filePath: string): string {

@@ -271,7 +271,7 @@ This repository **does not yet** implement the target model end-to-end. Today:
 | Append-only sync in PhraseVault core | **Hypercore + Hyperswarm** run inside MediaForest (`src/store/hypercore.ts`, `src/replication/manager.ts`) |
 | Config / user roster trees | **`server_key.json`** + in-memory sessions |
 | Collection trees | **`library` field** on media payload + sections in `userSettings` JSON |
-| Primary PVFS ordered tree | Flat **`GET /pvfs/locations`**; ingest via MF `ingestFile()` |
+| Primary PVFS ordered tree | MF uses **`POST /pvfs/ingest`** + dedup via **`GET /pvfs/locations`**; stream proxied from PV |
 | Per-user PVFS trees | Not implemented |
 | Streaming via PVFS | **`GET /stream/:nodeId`** on MediaForest resolves PV metadata and reads local disk |
 | Ingest / scan jobs | **MediaForest API** (`/pvfs/scan`, in-memory jobs) — correct layer, interim API |
