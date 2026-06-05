@@ -71,39 +71,13 @@ export default function App() {
     api.health().then(setHealth).catch(() => {})
   }, [token])
 
-  // Load section config
-  useEffect(() => {
-    if (!token) return
-    setSectionsLoading(true)
-    api.getSections()
-      .then(r => setSections(r.sections))
-      .catch(() => {})
-      .finally(() => setSectionsLoading(false))
-  }, [token])
-
-  // Full-text search (only when query is non-empty — collapses all sections)
-  const search = useCallback(async () => {
-    if (!token || !query) { setResults([]); return }
-    setLoading(true)
-    try {
-      const res = await api.search({ q: query })
-      setResults(res.results)
-    } catch (err) {
-      if (err instanceof UnauthorizedError) handleUnauthorized()
-    } finally {
-      setLoading(false)
-    }
-  }, [token, query])
-
-  useEffect(() => { search() }, [search])
-
-  // Load each section's results
-  const loadSections = useCallback(async () => {
-    if (!token || sections.length === 0) return
+  // Fetch results for a given list of sections and update state
+  async function fetchSectionResults(secs: SectionRecord[]) {
+    if (secs.length === 0) return
     setSectionResultsLoading(true)
     const map = new Map<string, MediaResult[]>()
     try {
-      await Promise.all(sections.map(async s => {
+      await Promise.all(secs.map(async s => {
         try {
           const params: Parameters<typeof api.search>[0] = {}
           if (s.filter.library) params.library = s.filter.library
@@ -122,9 +96,49 @@ export default function App() {
     } finally {
       setSectionResultsLoading(false)
     }
-  }, [token, sections])
+  }
 
-  useEffect(() => { loadSections() }, [loadSections])
+  // Load section config then immediately load their results — all inside one effect
+  // so sectionsLoading stays true until both phases complete (no intermediate blank render)
+  useEffect(() => {
+    if (!token) return
+    setSectionsLoading(true)
+    api.getSections()
+      .then(async r => {
+        setSections(r.sections)
+        await fetchSectionResults(r.sections)
+      })
+      .catch(() => {})
+      .finally(() => setSectionsLoading(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
+
+  // Full-text search (only when query is non-empty — collapses all sections)
+  const search = useCallback(async () => {
+    if (!token || !query) { setResults([]); return }
+    setLoading(true)
+    try {
+      const res = await api.search({ q: query })
+      setResults(res.results)
+    } catch (err) {
+      if (err instanceof UnauthorizedError) handleUnauthorized()
+    } finally {
+      setLoading(false)
+    }
+  }, [token, query])
+
+  useEffect(() => { search() }, [search])
+
+  // Explicit refresh — used after import, scan, settings close, etc.
+  const loadSections = useCallback(async () => {
+    if (!token) return
+    try {
+      const r = await api.getSections()
+      setSections(r.sections)
+      await fetchSectionResults(r.sections)
+    } catch { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
 
   if (!token) return <LoginPage onLogin={handleLogin} />
   if (showSettings) return (
