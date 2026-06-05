@@ -33,6 +33,7 @@ export default function App() {
   const [showInvite, setShowInvite] = useState(false)
   const [sections, setSections] = useState<SectionRecord[]>([])
   const [sectionsLoading, setSectionsLoading] = useState(true)
+  const [sectionResultsLoading, setSectionResultsLoading] = useState(false)
   const [sectionResults, setSectionResults] = useState<Map<string, MediaResult[]>>(new Map())
 
   function handleLogin(resp: LoginResponse) {
@@ -99,23 +100,28 @@ export default function App() {
   // Load each section's results
   const loadSections = useCallback(async () => {
     if (!token || sections.length === 0) return
+    setSectionResultsLoading(true)
     const map = new Map<string, MediaResult[]>()
-    await Promise.all(sections.map(async s => {
-      try {
-        const params: Parameters<typeof api.search>[0] = {}
-        if (s.filter.library) params.library = s.filter.library
-        if (s.filter.genre) params.genre = s.filter.genre
-        if (s.filter.watchStatus) params.watchStatus = s.filter.watchStatus
-        if (s.filter.kind) params.kind = s.filter.kind
-        if (s.filter.available) params.available = true
-        const res = await api.search(params)
-        let items = res.results
-        if (s.sort === 'title') items = [...items].sort((a, b) => a.title.localeCompare(b.title))
-        else if (s.sort === 'year') items = [...items].sort((a, b) => b.year - a.year)
-        map.set(s.id, items)
-      } catch { map.set(s.id, []) }
-    }))
-    setSectionResults(map)
+    try {
+      await Promise.all(sections.map(async s => {
+        try {
+          const params: Parameters<typeof api.search>[0] = {}
+          if (s.filter.library) params.library = s.filter.library
+          if (s.filter.genre) params.genre = s.filter.genre
+          if (s.filter.watchStatus) params.watchStatus = s.filter.watchStatus
+          if (s.filter.kind) params.kind = s.filter.kind
+          if (s.filter.available) params.available = true
+          const res = await api.search(params)
+          let items = res.results
+          if (s.sort === 'title') items = [...items].sort((a, b) => a.title.localeCompare(b.title))
+          else if (s.sort === 'year') items = [...items].sort((a, b) => b.year - a.year)
+          map.set(s.id, items)
+        } catch { map.set(s.id, []) }
+      }))
+      setSectionResults(map)
+    } finally {
+      setSectionResultsLoading(false)
+    }
   }, [token, sections])
 
   useEffect(() => { loadSections() }, [loadSections])
@@ -257,7 +263,7 @@ export default function App() {
       ) : (
         /* Section view */
         <div className="py-6 space-y-8">
-          {sectionsLoading ? (
+          {(sectionsLoading || sectionResultsLoading) ? (
             <div className="text-center text-gray-600 py-16 px-6">Loading…</div>
           ) : sections.length === 0 ? (
             <div className="text-center text-gray-600 py-16 px-6">
@@ -281,9 +287,7 @@ export default function App() {
             if (rendered.length === 0) {
               return (
                 <div className="text-center text-gray-600 py-16 px-6">
-                  {sectionResults.size === 0
-                    ? 'Loading…'
-                    : 'No media yet. Use 📂 Scan to import.'}
+                  No media yet. Use <strong>📂 Scan</strong> or <strong>🟠 Plex</strong> to import.
                 </div>
               )
             }
