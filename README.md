@@ -53,6 +53,10 @@ Go to Settings → Plex Media Server and enter your Plex server URL and token. T
 - Sessions expire after 24 hours.
 - Watchlists, home page sections, and provider configs (e.g. TMDB API key) are per-user. The media library (titles, files, sources) and libraries are shared across all users. Plex integration is server-level (owner only).
 
+## Architecture
+
+MediaForest is the media application layer; [PhraseVault](https://github.com/christcb03/phrasevault) is the separate platform (signed nodes, forest links, PVFS, append-only sync). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the target model and auth model; [docs/PVFS-API-WISHLIST.md](docs/PVFS-API-WISHLIST.md) for the PhraseVault PVFS API contract sketch.
+
 ## Deployment
 
 See [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).

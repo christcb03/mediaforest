@@ -1,5 +1,9 @@
 # Libraries, Import Staging, and Configurable Sections
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the **target** model: primary PVFS tree, title nodes, and **per-user collection trees** (Movies, Watchlist, etc. are the same structure).
+
+**Interim implementation (this doc):** libraries are a `library` field on media nodes and definitions in `server_key.json`; sections live in per-user JSON in `server_key.json`. That will move to **collection links** and **config tree** nodes in PhraseVault.
+
 ## Overview
 
 Three connected features that move MediaForest from a flat search list toward an

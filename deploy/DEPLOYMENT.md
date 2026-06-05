@@ -20,14 +20,19 @@ PhraseVault data persists at `/opt/phrasevault/data` on the host. MediaForest da
 ## CI/CD Pipeline
 
 ```
-git push origin main
+git push origin main  (per repo)
   → GitHub Actions (.github/workflows/docker.yml)
-  → builds ghcr.io/christcb03/mediaforest:latest
-  → pushes to GHCR (public package, no auth required to pull)
+  → builds ghcr.io/christcb03/<repo>:latest
+  → pushes to GHCR
   → Watchtower on presubuntu polls every 300s
-  → detects new digest → pulls → restarts mediaforest container
-  → sends Telegram notification
+  → detects new digest → pulls → restarts labeled container
+  → optional Telegram notification
 ```
+
+| Repo | Image | Auto-update on presubuntu |
+|------|-------|---------------------------|
+| mediaforest | `ghcr.io/christcb03/mediaforest:latest` | Yes (public GHCR) |
+| phrasevault | `ghcr.io/christcb03/phrasevault:latest` | Yes if Watchtower has GHCR creds; else manual pull |
 
 ## First-time Setup (new server)
 
@@ -51,7 +56,7 @@ git push origin main
 
 - **PhraseVault must run without `PV_PASSPHRASE`** (service mode). If passphrase mode is active, MediaForest cannot register its secp256k1 auth key and all storage operations will fail.
 - **MediaForest GHCR package is public** — no Docker auth needed on the host.
-- **PhraseVault GHCR package is private** — Watchtower cannot auto-update it without credentials. Manual pull: `docker compose pull && docker compose up -d` in `/home/chris/phrasevault/`.
+- **PhraseVault GHCR** — if Watchtower cannot pull (private package), manual: `cd /home/chris/phrasevault && docker compose pull && docker compose up -d`. See also [phrasevault docs/DEPLOY.md](https://github.com/christcb03/phrasevault/blob/main/docs/DEPLOY.md).
 - Watchtower (`watchtower-phrasevault` container) only monitors containers with `com.centurylinklabs.watchtower.enable=true` label.
 - Media library is mounted read-only from `/mnt/unionfs/Media` into both containers as `/media`.
 
