@@ -26,4 +26,8 @@ export interface StagedImportBatch {
   library?: string;
   itemCount: number;
   items: ImportItemBody[];
+  /** Auto-saved during directory scan; resume when the same path is scanned again. */
+  scanPath?: string;
+  status?: 'scan_in_progress' | 'ready';
+  scanFiles?: ImportFileBody[];
 }

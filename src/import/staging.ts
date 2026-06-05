@@ -1,6 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import type { ImportItemBody, StagedImportBatch } from './types.js';
+import type { ImportItemBody, StagedImportBatch, ImportFileBody } from './types.js';
+
+function normalizeScanPath(p: string): string {
+  return p.replace(/\/+$/, '') || '/';
+}
 
 export function stagedImportsPath(dataDir: string): string {
   return `${dataDir}/staged_imports.json`;
@@ -62,4 +66,57 @@ export function clearAllStagedImports(dataDir: string): number {
   if (n === 0) return 0;
   saveAll(dataDir, []);
   return n;
+}
+
+/** One auto-saved batch per scan path (updated as the scan discovers files). */
+export function upsertScanStagedBatch(
+  dataDir: string,
+  stagedBy: string,
+  scanPath: string,
+  library: string | undefined,
+  scanFiles: ImportFileBody[],
+  status: 'scan_in_progress' | 'ready',
+): StagedImportBatch {
+  const key = normalizeScanPath(scanPath);
+  const all = loadAll(dataDir);
+  const idx = all.findIndex(b => b.scanPath === key);
+  const batch: StagedImportBatch = {
+    id: idx >= 0 ? all[idx].id : randomBytes(12).toString('hex'),
+    stagedAt: Date.now(),
+    stagedBy,
+    library,
+    itemCount: idx >= 0 ? all[idx].itemCount : 0,
+    items: idx >= 0 ? all[idx].items : [],
+    scanPath: key,
+    status,
+    scanFiles,
+  };
+  if (idx >= 0) all[idx] = batch;
+  else all.push(batch);
+  saveAll(dataDir, all);
+  return batch;
+}
+
+export function getScanStagedBatch(dataDir: string, scanPath: string): StagedImportBatch | null {
+  const key = normalizeScanPath(scanPath);
+  return loadAll(dataDir).find(b => b.scanPath === key) ?? null;
+}
+
+export function updateStagedBatchItems(
+  dataDir: string,
+  batchId: string,
+  items: ImportItemBody[],
+): StagedImportBatch | null {
+  const all = loadAll(dataDir);
+  const idx = all.findIndex(b => b.id === batchId);
+  if (idx < 0) return null;
+  all[idx] = {
+    ...all[idx],
+    items,
+    itemCount: items.length,
+    status: items.length > 0 ? 'ready' : all[idx].status,
+    stagedAt: Date.now(),
+  };
+  saveAll(dataDir, all);
+  return all[idx];
 }

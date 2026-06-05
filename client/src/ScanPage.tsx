@@ -70,7 +70,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [dirPath, setDirPath] = useState('/media/Movies')
   const [limit, setLimit] = useState('5000')
   const [phase, setPhase] = useState<Phase>('idle')
-  const [scanProgress, setScanProgress] = useState(0)
+  const [filesSeen, setFilesSeen] = useState(0)
+  const [newFound, setNewFound] = useState(0)
+  const [resumedCount, setResumedCount] = useState(0)
   const [scanFiles, setScanFiles] = useState<ScannedFile[]>([])
   const [newCount, setNewCount] = useState(0)
   const [alreadyCount, setAlreadyCount] = useState(0)
@@ -106,12 +108,17 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const matchedTitlesRef = useRef(new Set<string>())   // keys already submitted for matching
   const matchInFlightRef = useRef(false)                // one match request at a time
   const pendingMatchRef = useRef<Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown' }>>([])
+  const detectedKindRef = useRef<'series' | 'movie'>('movie')
 
   const detectedKind = useMemo(() => {
     const tv = scanFiles.filter(f => f.parsed.kind === 'series').length
     const movie = scanFiles.filter(f => f.parsed.kind === 'movie').length
     return tv > movie ? 'series' : 'movie'
   }, [scanFiles])
+
+  useEffect(() => {
+    detectedKindRef.current = detectedKind
+  }, [detectedKind])
 
   const shows = useMemo(() =>
     groupShows(scanFiles.filter(f => f.parsed.kind === 'series' || f.parsed.kind === 'unknown' && detectedKind === 'series')),
@@ -225,15 +232,18 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     const newQueries: typeof pendingMatchRef.current = []
     for (const f of files) {
       if (f.already_ingested) continue
-      const key = `${f.parsed.title}::${f.parsed.kind}`
+      const matchKind = f.parsed.kind === 'unknown'
+        ? detectedKindRef.current
+        : f.parsed.kind
+      const key = `${f.parsed.title}::${matchKind}`
       if (!matchedTitlesRef.current.has(key)) {
         matchedTitlesRef.current.add(key)
-        newQueries.push({ title: f.parsed.title, year: f.parsed.year, kind: f.parsed.kind })
+        newQueries.push({ title: f.parsed.title, year: f.parsed.year, kind: matchKind })
       }
     }
     if (newQueries.length > 0) {
       pendingMatchRef.current.push(...newQueries)
-      flushMatchQueue()
+      void flushMatchQueue()
     }
   }
 
@@ -247,19 +257,29 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setMatchError('')
     setImportResult(null)
     setPhase('scanning')
-    setScanProgress(0)
+    setFilesSeen(0)
+    setNewFound(0)
+    setResumedCount(0)
     matchedTitlesRef.current = new Set()
     pendingMatchRef.current = []
     matchInFlightRef.current = false
     try {
-      const { jobId } = await api.pvfsScan({ path: dirPath, dry_run: true, limit: parseInt(limit) || undefined })
+      const maxNew = parseInt(limit, 10)
+      const { jobId, resumed } = await api.pvfsScan({
+        path: dirPath,
+        dry_run: true,
+        limit: Number.isFinite(maxNew) && maxNew > 0 ? maxNew : undefined,
+        library: selectedLibrary || undefined,
+      })
+      if (resumed && resumed > 0) setResumedCount(resumed)
+
       let lastFileCount = 0
-      pollRef.current = setInterval(async () => {
+      const tick = async () => {
         try {
           const res = await api.pvfsScanJob(jobId)
-          setScanProgress(res.found)
+          setFilesSeen(res.files_seen ?? 0)
+          setNewFound(res.new_count ?? res.found ?? 0)
 
-          // Progressive: show files and start matching as they stream in
           if (res.files.length > lastFileCount) {
             const newFiles = res.files.slice(lastFileCount)
             lastFileCount = res.files.length
@@ -269,26 +289,28 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           }
 
           if (res.status !== 'running') {
-            clearInterval(pollRef.current!)
+            if (pollRef.current) clearInterval(pollRef.current)
             pollRef.current = null
             if (res.status === 'error') {
               setError(res.error ?? 'Scan failed')
               setPhase('idle')
             } else {
-              // Final counts from the completed job
               setNewCount(res.new_count ?? res.files.filter(f => !f.already_ingested).length)
               setAlreadyCount(res.already_ingested_count ?? res.files.filter(f => f.already_ingested).length)
               setPhase('ready')
+              loadStaged()
             }
           }
         } catch (e) {
-          clearInterval(pollRef.current!)
+          if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
           if (e instanceof UnauthorizedError) onUnauthorized()
           else setError(e instanceof Error ? e.message : 'Poll failed')
           setPhase('idle')
         }
-      }, 2000)
+      }
+      await tick()
+      pollRef.current = setInterval(tick, 500)
     } catch (e) {
       setPhase('idle')
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
@@ -320,7 +342,6 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       return next
     })
   }, [detectedKind])
-
 
   // ── Override search ────────────────────────────────────────────────────────
 
@@ -473,6 +494,20 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     return items
   }
 
+  useEffect(() => {
+    if (phase !== 'scanning' && phase !== 'ready') return
+    if (scanFiles.length === 0) return
+    const t = setTimeout(() => {
+      const items = buildImportItems()
+      api.autosaveScanStage({
+        path: dirPath,
+        library: selectedLibrary || undefined,
+        items: items.length > 0 ? items : undefined,
+      }).then(() => loadStaged()).catch(() => {})
+    }, 3000)
+    return () => clearTimeout(t)
+  }, [phase, scanFiles, matchStates, selectedShows, selectedMovies, dirPath, selectedLibrary, loadStaged])
+
   async function handleImport() {
     if (unconfirmedNeedsReview > 0) {
       if (!window.confirm(`${unconfirmedNeedsReview} item(s) have low-confidence matches and haven't been confirmed. Import anyway?`)) return
@@ -552,7 +587,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         )}
         {phase === 'scanning' && (
           <span className="text-xs text-gray-500 ml-2 animate-pulse">
-            Scanning… {scanProgress} found
+            Scanning… {filesSeen} examined · {newFound} new to import
+            {resumedCount > 0 && ` · resumed ${resumedCount}`}
             {matchingProgress.total > 0 && ` · matching ${matchingProgress.done}/${matchingProgress.total}`}
           </span>
         )}
@@ -571,39 +607,49 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       <div className="max-w-6xl mx-auto px-6 py-6">
 
         {/* Scan controls */}
-        <div className="flex gap-3 mb-6">
-          <input
-            value={dirPath}
-            onChange={e => setDirPath(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && phase === 'idle' && handleScan()}
-            placeholder="/media"
-            disabled={phase !== 'idle' && phase !== 'ready'}
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 font-mono disabled:opacity-50"
-          />
-          <label className="flex flex-col gap-0.5 shrink-0" title="Maximum video files to collect from the scan (default 5000)">
-            <span className="text-[10px] text-gray-500 uppercase tracking-wide text-center">Max files</span>
+        <div className="flex flex-wrap items-end gap-3 mb-6">
+          <label className="flex flex-col gap-1 flex-1 min-w-[200px]">
+            <span className="text-xs text-gray-400">Folder to scan</span>
+            <input
+              value={dirPath}
+              onChange={e => setDirPath(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && (phase === 'idle' || phase === 'ready') && handleScan()}
+              placeholder="/media/Movies"
+              disabled={phase === 'scanning' || phase === 'importing'}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 font-mono disabled:opacity-50"
+            />
+          </label>
+          <label className="flex flex-col gap-1 w-28 shrink-0">
+            <span className="text-xs text-gray-400">Max new files</span>
             <input
               type="number"
               value={limit}
               onChange={e => setLimit(e.target.value)}
               min={1}
-              disabled={phase !== 'idle' && phase !== 'ready'}
-              className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
+              disabled={phase === 'scanning' || phase === 'importing'}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
             />
           </label>
           {libraries.length > 0 && (
-            <select
-              value={selectedLibrary}
-              onChange={e => setSelectedLibrary(e.target.value)}
-              disabled={phase === 'importing'}
-              title="Library label stored on imported titles (does not choose the scan folder — use the path field)"
-              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-            >
-              <option value="">No library</option>
-              {libraries.map(l => (
-                <option key={l.id} value={l.id}>{l.name}</option>
-              ))}
-            </select>
+            <label className="flex flex-col gap-1 min-w-[140px]">
+              <span className="text-xs text-gray-400">Add imports to library</span>
+              <select
+                value={selectedLibrary}
+                onChange={e => {
+                  const id = e.target.value
+                  setSelectedLibrary(id)
+                  const lib = libraries.find(l => l.id === id)
+                  if (lib?.defaultPath) setDirPath(lib.defaultPath)
+                }}
+                disabled={phase === 'importing'}
+                className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+              >
+                <option value="">No library</option>
+                {libraries.map(l => (
+                  <option key={l.id} value={l.id}>{l.name}</option>
+                ))}
+              </select>
+            </label>
           )}
           <button
             onClick={handleScan}
@@ -658,16 +704,23 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
               {stagedBatches.map(b => (
                 <li key={b.id} className="flex flex-wrap items-center gap-2 text-xs text-gray-300">
                   <span className="font-mono text-gray-500">{b.id.slice(0, 10)}…</span>
-                  <span>{b.itemCount} items</span>
+                  {b.status === 'scan_in_progress' ? (
+                    <span className="text-amber-400/90">Scan saved · {b.scanFileCount ?? 0} files</span>
+                  ) : (
+                    <span>{b.itemCount} items</span>
+                  )}
+                  {b.scanPath && <span className="font-mono text-gray-600">{b.scanPath}</span>}
                   {b.library && <span className="text-gray-500">· {b.library}</span>}
                   <span className="text-gray-600">{new Date(b.stagedAt).toLocaleString()}</span>
-                  <button
-                    type="button"
-                    onClick={() => handleCommitStaged(b.id)}
-                    className="bg-green-800 hover:bg-green-700 text-white rounded px-2 py-1"
-                  >
-                    Commit
-                  </button>
+                  {b.status !== 'scan_in_progress' && (
+                    <button
+                      type="button"
+                      onClick={() => handleCommitStaged(b.id)}
+                      className="bg-green-800 hover:bg-green-700 text-white rounded px-2 py-1"
+                    >
+                      Commit
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => api.discardStagedImport(b.id).then(loadStaged).catch(() => {})}
@@ -697,8 +750,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
 
         {/* Scanning — show spinner until first files arrive, then step aside */}
         {phase === 'scanning' && scanFiles.length === 0 && (
-          <div className="text-center text-gray-500 py-16 text-sm animate-pulse">
-            Scanning {dirPath}…
+          <div className="text-center text-gray-500 py-16 text-sm animate-pulse space-y-1">
+            <p>Scanning {dirPath}…</p>
+            <p className="text-xs">{filesSeen} video files examined · {newFound} new to import</p>
           </div>
         )}
 

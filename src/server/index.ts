@@ -31,7 +31,12 @@ import { runBatchImport } from "../import/batch-import.js";
 import type { ImportItemBody } from "../import/types.js";
 import {
   listStagedImports, getStagedImport, createStagedImport, deleteStagedImport,
+  upsertScanStagedBatch, updateStagedBatchItems,
 } from "../import/staging.js";
+import {
+  getScanSession, upsertScanSession, deleteScanSession, sessionPathSet,
+} from "../import/scan-session.js";
+import type { ScannedFile } from "../scan/scan.js";
 import {
   validateFactoryResetBody, buildFactoryResetPreview,
   executeServerFactoryReset, countStaged,
@@ -885,6 +890,9 @@ app.get("/import/staged", async (req, reply) => {
     library: b.library,
     itemCount: b.itemCount,
     mine: b.stagedBy === user.pubKey,
+    scanPath: b.scanPath,
+    status: b.status,
+    scanFileCount: b.scanFiles?.length,
   }));
   return reply.send({ batches });
 });
@@ -907,6 +915,36 @@ app.post<{ Body: { items: ImportItemBody[]; library?: string } }>(
   },
 );
 
+app.put<{ Body: { path: string; library?: string; items?: ImportItemBody[] } }>(
+  "/import/stage/scan",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    const { path: scanPath, library, items } = req.body;
+    if (!scanPath) return reply.status(400).send({ error: "path is required" });
+    const session = getScanSession(DATA_DIR, scanPath);
+    if (!session) return reply.status(404).send({ error: "no scan session for this path" });
+    const scanFiles = session.files.map(f => ({
+      path: f.path,
+      size_bytes: f.size_bytes,
+      ext: f.ext,
+      already_ingested: f.already_ingested,
+      parsed: f.parsed,
+    }));
+    const batch = upsertScanStagedBatch(
+      DATA_DIR,
+      user.pubKey,
+      scanPath,
+      library ?? session.library,
+      scanFiles,
+      items && items.length > 0 ? "ready" : "scan_in_progress",
+    );
+    if (items && items.length > 0) {
+      updateStagedBatchItems(DATA_DIR, batch.id, items);
+    }
+    return reply.send({ id: batch.id, itemCount: batch.itemCount, scanFileCount: scanFiles.length });
+  },
+);
+
 app.post<{ Params: { id: string } }>(
   "/import/commit/:id",
   async (req, reply) => {
@@ -914,6 +952,7 @@ app.post<{ Params: { id: string } }>(
     const batch = getStagedImport(DATA_DIR, req.params.id);
     if (!batch) return reply.status(404).send({ error: "staged batch not found" });
     const result = await runBatchImport(batchImportDeps(), batch.items, user.pubKey);
+    if (batch.scanPath) deleteScanSession(DATA_DIR, batch.scanPath);
     deleteStagedImport(DATA_DIR, batch.id);
     return reply.send({ stagedId: batch.id, ...result });
   },
@@ -1265,27 +1304,89 @@ app.post("/plex/sync-watch", async (req, reply) => {
 
 interface ScanJob {
   status: "running" | "done" | "error";
-  startedAt: number; dry_run: boolean; found: number;
-  new_count?: number; already_ingested_count?: number;
-  files: unknown[]; ingested?: number; failed?: number;
-  failures?: Array<{ path: string; error: string }>; error?: string;
+  startedAt: number;
+  dry_run: boolean;
+  scanPath: string;
+  library?: string;
+  /** Video files examined on disk (includes already in library). */
+  files_seen: number;
+  /** New files collected this run (not in PhraseVault / prior scan session). */
+  found: number;
+  new_count?: number;
+  already_ingested_count?: number;
+  resumed_from_session?: number;
+  files: ScannedFile[] | Array<{ path: string; fileNodeId: string; contentHash: string }>;
+  ingested?: number;
+  failed?: number;
+  failures?: Array<{ path: string; error: string }>;
+  error?: string;
 }
 const scanJobs = new Map<string, ScanJob>();
 
-app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number } }>(
+function persistScanProgress(
+  job: ScanJob,
+  stagedBy: string,
+): void {
+  const files = job.files as ScannedFile[];
+  upsertScanSession(DATA_DIR, job.scanPath, {
+    library: job.library,
+    status: job.status === "done" ? "complete" : "scanning",
+    files,
+  });
+  upsertScanStagedBatch(
+    DATA_DIR,
+    stagedBy,
+    job.scanPath,
+    job.library,
+    files,
+    job.status === "done" ? "ready" : "scan_in_progress",
+  );
+}
+
+app.get<{ Querystring: { path?: string } }>("/pvfs/scan/session", async (req, reply) => {
+  const scanPath = req.query.path;
+  if (!scanPath) return reply.status(400).send({ error: "path query is required" });
+  const session = getScanSession(DATA_DIR, scanPath);
+  return reply.send({ session });
+});
+
+app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number; library?: string } }>(
   "/pvfs/scan",
   async (req, reply) => {
-    const { path: dirPath, dry_run = true, extensions, limit } = req.body;
+    const scanUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    const { path: dirPath, dry_run = true, extensions, limit, library } = req.body;
     if (!dirPath) return reply.status(400).send({ error: "path is required" });
     if (!existsSync(dirPath)) return reply.status(400).send({ error: `directory not found: ${dirPath}` });
 
+    const priorSession = getScanSession(DATA_DIR, dirPath);
+    const resume = priorSession?.status === "scanning";
+    const initialFiles = resume ? [...priorSession.files] : [];
+    if (!resume) {
+      upsertScanSession(DATA_DIR, dirPath, { library, status: "scanning", files: [] });
+    }
+
     const jobId = randomBytes(16).toString("hex");
-    const job: ScanJob = { status: "running", startedAt: Date.now(), dry_run, found: 0, files: [] };
+    const job: ScanJob = {
+      status: "running",
+      startedAt: Date.now(),
+      dry_run,
+      scanPath: dirPath,
+      library,
+      files_seen: 0,
+      found: initialFiles.length,
+      new_count: initialFiles.length,
+      already_ingested_count: 0,
+      resumed_from_session: initialFiles.length,
+      files: initialFiles,
+    };
     scanJobs.set(jobId, job);
 
     const extSet = extensions
       ? new Set(extensions.map(e => e.startsWith(".") ? e.toLowerCase() : "." + e.toLowerCase()))
       : undefined;
+
+    const maxNew = limit && limit > 0 ? limit : undefined;
+    let lastPersist = 0;
 
     ;(async () => {
       try {
@@ -1294,18 +1395,35 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
           ingestedUris = await pv.getIngestedUriSet();
         } catch { /* PV not available, proceed without dedup */ }
 
+        const sessionSkip = sessionPathSet(
+          resume ? priorSession : getScanSession(DATA_DIR, dirPath),
+        );
+
         if (dry_run) {
-          let count = 0;
-          await scanVideoFilesAsync(dirPath, extSet, undefined, (file) => {
-            if (limit && count >= limit) return false;
+          let newCount = initialFiles.length;
+          await scanVideoFilesAsync(dirPath, extSet, (seen) => {
+            job.files_seen = seen;
+          }, (file) => {
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
-            (job.files as typeof file[]).push(file);
-            count++;
-            job.found = count;
-            job.new_count = (job.files as typeof file[]).filter(f => !f.already_ingested).length;
-            job.already_ingested_count = count - (job.new_count ?? 0);
+            if (file.already_ingested) {
+              job.already_ingested_count = (job.already_ingested_count ?? 0) + 1;
+              return;
+            }
+            if (sessionSkip.has(file.path)) return;
+            if (maxNew && newCount >= maxNew) return false;
+            (job.files as ScannedFile[]).push(file);
+            sessionSkip.add(file.path);
+            newCount++;
+            job.found = newCount;
+            job.new_count = newCount;
+            const now = Date.now();
+            if (now - lastPersist > 3000) {
+              lastPersist = now;
+              persistScanProgress(job, scanUser.pubKey);
+            }
           });
           job.status = "done";
+          persistScanProgress(job, scanUser.pubKey);
           return;
         }
 
@@ -1337,7 +1455,7 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
       }
     })();
 
-    return reply.status(202).send({ jobId });
+    return reply.status(202).send({ jobId, resumed: initialFiles.length });
   },
 );
 

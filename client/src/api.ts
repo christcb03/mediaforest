@@ -390,10 +390,27 @@ export const api = {
   upsertProvider: (providerId: string, body: { read_access_token?: string; enabled?: boolean; name?: string; [key: string]: unknown }) =>
     put<{ provider_id: string; enabled: boolean; updated: boolean }>(`/config/providers/${providerId}`, body),
   pvfsUnimported: () => get<{ files: UnimportedFile[] }>('/pvfs/unimported'),
-  pvfsScan: (body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number }) =>
-    post<{ jobId: string }>('/pvfs/scan', body),
+  pvfsScan: (body: { path: string; dry_run?: boolean; extensions?: string[]; limit?: number; library?: string }) =>
+    post<{ jobId: string; resumed?: number }>('/pvfs/scan', body),
   pvfsScanJob: (jobId: string) =>
-    get<{ status: 'running' | 'done' | 'error'; found: number; new_count?: number; already_ingested_count?: number; dry_run: boolean; files: ScannedFile[]; ingested?: number; failed?: number; failures?: Array<{ path: string; error: string }>; error?: string }>(`/pvfs/scan/job/${jobId}`),
+    get<{
+      status: 'running' | 'done' | 'error';
+      files_seen: number;
+      found: number;
+      new_count?: number;
+      already_ingested_count?: number;
+      resumed_from_session?: number;
+      dry_run: boolean;
+      files: ScannedFile[];
+      ingested?: number;
+      failed?: number;
+      failures?: Array<{ path: string; error: string }>;
+      error?: string;
+    }>(`/pvfs/scan/job/${jobId}`),
+  getScanSession: (path: string) =>
+    get<{ session: ScanSessionSnapshot | null }>(`/pvfs/scan/session?path=${encodeURIComponent(path)}`),
+  autosaveScanStage: (body: { path: string; library?: string; items?: ImportItem[] }) =>
+    put<{ id: string; itemCount: number; scanFileCount: number }>('/import/stage/scan', body),
   matchSearch: (body: { items: Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown' }>; threshold?: number }) =>
     post<{ results: MatchSearchResult[]; threshold: number }>('/media/match/search', body),
   importBatch: (body: { items: ImportItem[]; library?: string; tags?: string[] }) =>
@@ -452,6 +469,17 @@ export interface StagedBatchSummary {
   library?: string;
   itemCount: number;
   mine: boolean;
+  scanPath?: string;
+  status?: 'scan_in_progress' | 'ready';
+  scanFileCount?: number;
+}
+
+export interface ScanSessionSnapshot {
+  scanPath: string;
+  library?: string;
+  updatedAt: number;
+  status: 'scanning' | 'complete';
+  files: ScannedFile[];
 }
 
 export interface FactoryResetPreview {

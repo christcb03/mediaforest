@@ -202,9 +202,9 @@ export async function scanVideoFilesAsync(
         if (extensions.has(ext)) {
           const parsed = parseMediaPath(fullPath)
           const file: ScannedFile = { path: fullPath, size_bytes: st.size, ext, parsed, local_artwork: findLocalArtwork(fullPath, parsed.title) }
-          results.push(file)
           if (onFile?.(file) === false) return true
-          if (onProgress && results.length % 50 === 0) onProgress(results.length)
+          results.push(file)
+          if (onProgress) onProgress(results.length)
         }
       }
     }
