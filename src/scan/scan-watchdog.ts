@@ -42,9 +42,3 @@ export function startScanWatchdog(
     isAborted: () => aborted,
   };
 }
-
-/** Cap filesystem walk when seeking N new files but library is already full. */
-export function maxEntriesWithoutNew(maxNew: number | undefined): number {
-  if (!maxNew || maxNew <= 0) return Infinity;
-  return Math.max(maxNew * 3000, 30_000);
-}

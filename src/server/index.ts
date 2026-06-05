@@ -26,7 +26,7 @@ import {
 } from "../relay/index.js";
 import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync, findLocalArtwork } from "../scan/scan.js";
-import { startScanWatchdog, maxEntriesWithoutNew } from "../scan/scan-watchdog.js";
+import { startScanWatchdog } from "../scan/scan-watchdog.js";
 import { scoreCandidates } from "../scan/matcher.js";
 import { runBatchImport } from "../import/batch-import.js";
 import type { ImportItemBody } from "../import/types.js";
@@ -1395,9 +1395,7 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
       : undefined;
 
     const maxNew = limit && limit > 0 ? limit : undefined;
-    const entriesCap = maxEntriesWithoutNew(maxNew);
     let lastPersist = 0;
-    let entriesAtLastNew = 0;
 
     const watchdog = startScanWatchdog(job, (msg) => {
       job.error = msg;
@@ -1406,15 +1404,11 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
     ;(async () => {
       try {
-        job.phase = "indexing";
-        job.current_dir = "(PhraseVault file index)";
-        watchdog.touch();
+        // Load PV dedup index in parallel — never block the filesystem walk on it.
         let ingestedUris = new Set<string>();
-        const indexStart = Date.now();
-        ingestedUris = await pv.getIngestedUriSet(8_000);
-        if (Date.now() - indexStart >= 8_000) {
-          job.index_warning = "PhraseVault index was slow; continuing scan";
-        }
+        void pv.getIngestedUriSet(8_000).then((s) => {
+          ingestedUris = s;
+        }).catch(() => {});
 
         if (watchdog.isAborted()) return;
 
@@ -1424,7 +1418,6 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
         if (dry_run) {
           let newCount = initialFiles.length;
-          entriesAtLastNew = 0;
           job.phase = "walking";
           await scanVideoFilesAsync(dirPath, extSet, (p) => {
             watchdog.touch();
@@ -1432,17 +1425,6 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
             job.dirs_scanned = p.dirsScanned;
             job.entries_scanned = p.entriesScanned;
             job.current_dir = p.currentDir;
-            if (
-              maxNew
-              && newCount < maxNew
-              && p.entriesScanned - entriesAtLastNew > entriesCap
-            ) {
-              throw new Error(
-                `Scanned ${p.entriesScanned - entriesAtLastNew} files and folders under `
-                + `${dirPath} without finding ${maxNew} new imports. `
-                + "Most media may already be registered in PhraseVault — try a subfolder or raise the max.",
-              );
-            }
           }, (file) => {
             if (watchdog.isAborted()) return false;
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
@@ -1457,7 +1439,6 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
             newCount++;
             job.found = newCount;
             job.new_count = newCount;
-            entriesAtLastNew = job.entries_scanned ?? 0;
             const now = Date.now();
             if (now - lastPersist > 10_000) {
               lastPersist = now;
