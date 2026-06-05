@@ -205,9 +205,10 @@ Section view mode (row/grid) and section filters are configurable from Settings.
 - [x] AddMediaModal shows local unimported files first when search is empty (green "Match →" rows)
 - [x] Clicking a PVFS file pre-fills the stream URL + size, pre-searches TMDB, skips directly to storage step
 
-### Phase D — import staging (pending)
-- [ ] `staged_imports.json` persistence
-- [ ] `/import/stage` and `/import/commit/:id` endpoints
+### Phase D — import staging
+- [x] `staged_imports.json` persistence
+- [x] `GET /import/staged`, `POST /import/stage`, `POST /import/commit/:id`, `DELETE /import/staged/:id`
+- [x] ScanPage: Stage / Import now + staged batch panel
 - [ ] Stage/commit UI in ScanPage
 - [ ] Staged batch review panel with commit/discard
 

@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
-import { api, UnauthorizedError } from './api'
-import type { ProviderConfig, UserRecord, AuthConfig, LibraryRecord, SectionRecord, SectionFilter } from './api'
+import { api, UnauthorizedError, FACTORY_RESET_PHRASE } from './api'
+import type {
+  ProviderConfig, UserRecord, AuthConfig, LibraryRecord, SectionRecord, SectionFilter,
+  FactoryResetPreview,
+} from './api'
 
 interface Props {
   onClose: () => void
@@ -52,6 +55,14 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
   const [newSecFilter, setNewSecFilter] = useState<SectionFilter>({})
   const [newSecSort, setNewSecSort] = useState<string>('')
   const [secMsg, setSecMsg] = useState<string | null>(null)
+
+  const [resetPreview, setResetPreview] = useState<FactoryResetPreview | null>(null)
+  const [resetPhrase, setResetPhrase] = useState('')
+  const [resetAckIrreversible, setResetAckIrreversible] = useState(false)
+  const [resetAckMembers, setResetAckMembers] = useState(false)
+  const [resetAckPvfs, setResetAckPvfs] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetMsg, setResetMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
   useEffect(() => {
     api.getProviders()
@@ -727,6 +738,113 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
             </div>
           </div>
         </section>
+
+        {/* Owner: factory reset */}
+        {isOwner && (
+          <section className="border border-red-900/60 rounded-xl p-5 bg-red-950/30">
+            <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-2">
+              Factory reset (entire server)
+            </h2>
+            <p className="text-xs text-red-200/80 mb-4 leading-relaxed">
+              Permanently deletes the shared catalog, all member accounts, invites, staged imports,
+              libraries, per-user settings, followed feeds, and the PhraseVault file inventory.
+              Your owner login remains. This cannot be undone.
+            </p>
+            {!resetPreview ? (
+              <button
+                type="button"
+                onClick={() => {
+                  api.factoryResetPreview()
+                    .then(setResetPreview)
+                    .catch(err => {
+                      if (err instanceof UnauthorizedError) onUnauthorized()
+                      else setResetMsg({ text: String(err), ok: false })
+                    })
+                }}
+                className="text-sm border border-red-700 text-red-300 hover:bg-red-900/40 rounded-lg px-4 py-2"
+              >
+                Load impact preview…
+              </button>
+            ) : (
+              <div className="space-y-3 text-xs text-gray-300 mb-4">
+                <p className="text-red-300">{resetPreview.warning}</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>{resetPreview.hypercore_nodes} catalog nodes</li>
+                  <li>{resetPreview.member_accounts} member accounts</li>
+                  <li>{resetPreview.invites_pending} pending invites</li>
+                  <li>{resetPreview.staged_import_batches} staged import batches</li>
+                  <li>{resetPreview.followed_feeds} followed feeds</li>
+                  <li>{resetPreview.libraries_defined} library definitions</li>
+                </ul>
+              </div>
+            )}
+            <label className="block text-xs text-gray-400 mb-1">
+              Type <span className="font-mono text-red-300">{FACTORY_RESET_PHRASE}</span> to confirm
+            </label>
+            <input
+              value={resetPhrase}
+              onChange={e => setResetPhrase(e.target.value)}
+              className="w-full bg-gray-900 border border-red-800 rounded-lg px-3 py-2 text-sm font-mono mb-3 focus:outline-none focus:border-red-500"
+              placeholder={FACTORY_RESET_PHRASE}
+            />
+            <div className="space-y-2 mb-4">
+              {[
+                [resetAckIrreversible, setResetAckIrreversible, 'I understand this is irreversible'],
+                [resetAckMembers, setResetAckMembers, 'Delete all member accounts and invites'],
+                [resetAckPvfs, setResetAckPvfs, 'Delete all PhraseVault files and forest data on this server'],
+              ].map(([checked, setChecked, label]) => (
+                <label key={String(label)} className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={checked as boolean}
+                    onChange={e => (setChecked as (v: boolean) => void)(e.target.checked)}
+                    className="rounded border-gray-600"
+                  />
+                  {label as string}
+                </label>
+              ))}
+            </div>
+            <button
+              type="button"
+              disabled={
+                resetBusy
+                || resetPhrase !== FACTORY_RESET_PHRASE
+                || !resetAckIrreversible
+                || !resetAckMembers
+                || !resetAckPvfs
+              }
+              onClick={async () => {
+                if (!window.confirm('Last chance: wipe ALL server data for every user?')) return
+                setResetBusy(true)
+                setResetMsg(null)
+                try {
+                  await api.factoryReset({
+                    confirmation_phrase: resetPhrase,
+                    acknowledge_irreversible: true,
+                    acknowledge_remove_all_members: true,
+                    acknowledge_remove_pvfs_inventory: true,
+                  })
+                  setResetMsg({ text: 'Factory reset complete. Reload the app.', ok: true })
+                  setResetPhrase('')
+                  setResetAckIrreversible(false)
+                  setResetAckMembers(false)
+                  setResetAckPvfs(false)
+                } catch (err) {
+                  if (err instanceof UnauthorizedError) onUnauthorized()
+                  else setResetMsg({ text: err instanceof Error ? err.message : 'Reset failed', ok: false })
+                } finally {
+                  setResetBusy(false)
+                }
+              }}
+              className="text-sm bg-red-800 hover:bg-red-700 disabled:opacity-40 text-white rounded-lg px-4 py-2 font-medium"
+            >
+              {resetBusy ? 'Resetting…' : 'Factory reset server'}
+            </button>
+            {resetMsg && (
+              <p className={`text-xs mt-3 ${resetMsg.ok ? 'text-green-400' : 'text-red-400'}`}>{resetMsg.text}</p>
+            )}
+          </section>
+        )}
 
         {/* Forest info */}
         <section>

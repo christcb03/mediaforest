@@ -291,6 +291,20 @@ export class PhraseVaultClient {
     );
   }
 
+  async factoryReset(body: {
+    confirmation_phrase: string;
+    acknowledge_irreversible: boolean;
+  }) {
+    return this.post<{ reset: boolean }>('/admin/factory-reset', {
+      confirmation_phrase: body.confirmation_phrase,
+      acknowledge_irreversible: body.acknowledge_irreversible,
+    });
+  }
+
+  async factoryResetPreview() {
+    return this.get<{ warning: string; pvfs_file_nodes: number }>('/admin/factory-reset/preview');
+  }
+
   /** @deprecated Prefer ingestPvfsFile — hashes in MF and duplicates PV work. */
   async createPvfsFile(payload: {
     content_hash: string; size_bytes: number;

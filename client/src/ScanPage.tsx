@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { api, UnauthorizedError } from './api'
-import type { ScannedFile, MatchCandidate, MatchSource, ImportItem, LibraryRecord } from './api'
+import type { ScannedFile, MatchCandidate, MatchSource, ImportItem, LibraryRecord, StagedBatchSummary } from './api'
 
 interface Props {
   onClose: () => void
@@ -77,6 +77,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [error, setError] = useState('')
   const [matchError, setMatchError] = useState('')
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
+  const [stagedBatches, setStagedBatches] = useState<StagedBatchSummary[]>([])
+  const [stageMsg, setStageMsg] = useState('')
 
   // Library selection
   const [libraries, setLibraries] = useState<LibraryRecord[]>([])
@@ -91,6 +93,14 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [matchStates, setMatchStates] = useState<Map<string, MatchState>>(new Map())
   const [matchingProgress, setMatchingProgress] = useState({ done: 0, total: 0 })
   const [threshold] = useState(0.8)
+
+  const loadStaged = useCallback(() => {
+    api.listStagedImports()
+      .then(r => setStagedBatches(r.batches))
+      .catch(() => setStagedBatches([]))
+  }, [])
+
+  useEffect(() => { loadStaged() }, [loadStaged])
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const matchedTitlesRef = useRef(new Set<string>())   // keys already submitted for matching
@@ -432,15 +442,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     return count
   }, [selectedShows, selectedMovies, matchStates, shows, movies])
 
-  async function handleImport() {
-    if (unconfirmedNeedsReview > 0) {
-      if (!window.confirm(`${unconfirmedNeedsReview} item(s) have low-confidence matches and haven't been confirmed. Import anyway?`)) return
-    }
-
-    setPhase('importing')
+  function buildImportItems(): ImportItem[] {
     const items: ImportItem[] = []
-
-    // Shows
     for (const [title, seasonSet] of selectedShows) {
       const group = shows.find(s => s.title === title)
       if (!group) continue
@@ -453,8 +456,6 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       }
       items.push({ kind: 'series', files, selected_seasons: selectedSeasons, match: matchSrc, library: selectedLibrary || undefined })
     }
-
-    // Movies
     for (const filePath of selectedMovies) {
       const f = movies.find(m => m.path === filePath)
       if (!f) continue
@@ -462,14 +463,50 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       const matchSrc = buildMatchSource(ms, f.parsed.title, 'movie')
       items.push({ kind: 'movie', files: [f], match: matchSrc, library: selectedLibrary || undefined })
     }
+    return items
+  }
 
+  async function handleImport() {
+    if (unconfirmedNeedsReview > 0) {
+      if (!window.confirm(`${unconfirmedNeedsReview} item(s) have low-confidence matches and haven't been confirmed. Import anyway?`)) return
+    }
+    setPhase('importing')
     try {
-      const result = await api.importBatch({ items })
+      const result = await api.importBatch({ items: buildImportItems() })
       setImportResult({ imported: result.imported, failed: result.failed })
       setPhase('done')
     } catch (e) {
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError(e instanceof Error ? e.message : 'Import failed')
+      setPhase('ready')
+    }
+  }
+
+  async function handleStage() {
+    if (unconfirmedNeedsReview > 0) {
+      if (!window.confirm(`${unconfirmedNeedsReview} uncertain match(es) — stage anyway?`)) return
+    }
+    setStageMsg('')
+    try {
+      const r = await api.stageImport({ items: buildImportItems(), library: selectedLibrary || undefined })
+      setStageMsg(`Staged ${r.itemCount} item(s) — id ${r.id.slice(0, 8)}…`)
+      loadStaged()
+    } catch (e) {
+      if (e instanceof UnauthorizedError) { onUnauthorized(); return }
+      setStageMsg(e instanceof Error ? e.message : 'Stage failed')
+    }
+  }
+
+  async function handleCommitStaged(id: string) {
+    setPhase('importing')
+    try {
+      const result = await api.commitStagedImport(id)
+      setImportResult({ imported: result.imported, failed: result.failed })
+      setPhase('done')
+      loadStaged()
+    } catch (e) {
+      if (e instanceof UnauthorizedError) { onUnauthorized(); return }
+      setError(e instanceof Error ? e.message : 'Commit failed')
       setPhase('ready')
     }
   }
@@ -501,6 +538,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       <header className="border-b border-gray-800 px-6 py-4 flex items-center gap-4">
         <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm">← Back</button>
         <h1 className="text-base font-semibold text-white">Library Import</h1>
+        {stagedBatches.length > 0 && (
+          <span className="text-xs bg-amber-900/60 text-amber-200 border border-amber-700 rounded-full px-2 py-0.5">
+            {stagedBatches.length} staged
+          </span>
+        )}
         {phase === 'scanning' && (
           <span className="text-xs text-gray-500 ml-2 animate-pulse">
             Scanning… {scanProgress} found
@@ -575,20 +617,60 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             </button>
           )}
           {phase === 'ready' && selectedCount > 0 && (
-            <button
-              onClick={handleImport}
-              disabled={phase !== 'ready'}
-              className="bg-green-700 hover:bg-green-600 disabled:opacity-50 text-sm text-white rounded-lg px-5 py-2.5 font-medium"
-            >
-              Import {selectedCount} selected
-              {unconfirmedNeedsReview > 0 && (
-                <span className="ml-1.5 bg-yellow-600 text-white rounded-full text-xs px-1.5 py-0.5">
-                  {unconfirmedNeedsReview} review
-                </span>
-              )}
-            </button>
+            <>
+              <button
+                onClick={handleStage}
+                className="bg-amber-800 hover:bg-amber-700 text-sm text-white rounded-lg px-4 py-2.5 font-medium"
+              >
+                Stage {selectedCount}
+              </button>
+              <button
+                onClick={handleImport}
+                disabled={phase !== 'ready'}
+                className="bg-green-700 hover:bg-green-600 disabled:opacity-50 text-sm text-white rounded-lg px-5 py-2.5 font-medium"
+              >
+                Import now
+                {unconfirmedNeedsReview > 0 && (
+                  <span className="ml-1.5 bg-yellow-600 text-white rounded-full text-xs px-1.5 py-0.5">
+                    {unconfirmedNeedsReview} review
+                  </span>
+                )}
+              </button>
+            </>
           )}
         </div>
+
+        {stageMsg && <p className="text-amber-300 text-sm mb-2">{stageMsg}</p>}
+
+        {stagedBatches.length > 0 && (
+          <div className="mb-4 p-4 rounded-lg border border-amber-800/50 bg-amber-950/20">
+            <h2 className="text-sm font-medium text-amber-200 mb-2">Staged imports</h2>
+            <ul className="space-y-2">
+              {stagedBatches.map(b => (
+                <li key={b.id} className="flex flex-wrap items-center gap-2 text-xs text-gray-300">
+                  <span className="font-mono text-gray-500">{b.id.slice(0, 10)}…</span>
+                  <span>{b.itemCount} items</span>
+                  {b.library && <span className="text-gray-500">· {b.library}</span>}
+                  <span className="text-gray-600">{new Date(b.stagedAt).toLocaleString()}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleCommitStaged(b.id)}
+                    className="bg-green-800 hover:bg-green-700 text-white rounded px-2 py-1"
+                  >
+                    Commit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => api.discardStagedImport(b.id).then(loadStaged).catch(() => {})}
+                    className="text-gray-500 hover:text-red-400"
+                  >
+                    Discard
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
 

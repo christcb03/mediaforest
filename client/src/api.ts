@@ -417,4 +417,45 @@ export const api = {
     if (params.limit != null)     qs.set('limit', String(params.limit));
     return get<AdminNodesResponse>(`/admin/nodes?${qs}`);
   },
+  // Import staging
+  listStagedImports: () => get<{ batches: StagedBatchSummary[] }>('/import/staged'),
+  stageImport: (body: { items: ImportItem[]; library?: string }) =>
+    post<{ id: string; stagedAt: number; itemCount: number }>('/import/stage', body),
+  commitStagedImport: (id: string) =>
+    post<ImportResult & { stagedId: string }>(`/import/commit/${id}`, {}),
+  discardStagedImport: (id: string) => del<{ discarded: boolean }>(`/import/staged/${id}`),
+  // Factory reset (owner)
+  factoryResetPreview: () => get<FactoryResetPreview>('/admin/factory-reset/preview'),
+  factoryReset: (body: FactoryResetRequest) =>
+    post<{ ok: boolean; summary: Record<string, unknown> }>('/admin/factory-reset', body),
 };
+
+export const FACTORY_RESET_PHRASE = 'DELETE ALL MEDIA DATA';
+
+export interface StagedBatchSummary {
+  id: string;
+  stagedAt: number;
+  stagedBy: string;
+  library?: string;
+  itemCount: number;
+  mine: boolean;
+}
+
+export interface FactoryResetPreview {
+  warning: string;
+  confirmation_phrase_required: string;
+  hypercore_nodes: number;
+  member_accounts: number;
+  invites_pending: number;
+  staged_import_batches: number;
+  followed_feeds: number;
+  libraries_defined: number;
+  actions: string[];
+}
+
+export interface FactoryResetRequest {
+  confirmation_phrase: string;
+  acknowledge_irreversible: boolean;
+  acknowledge_remove_all_members: boolean;
+  acknowledge_remove_pvfs_inventory: boolean;
+}

@@ -27,6 +27,15 @@ import {
 import { PhraseVaultClient } from "../pv/client.js";
 import { scanVideoFilesAsync } from "../scan/scan.js";
 import { scoreCandidates } from "../scan/matcher.js";
+import { runBatchImport } from "../import/batch-import.js";
+import type { ImportItemBody } from "../import/types.js";
+import {
+  listStagedImports, getStagedImport, createStagedImport, deleteStagedImport,
+} from "../import/staging.js";
+import {
+  validateFactoryResetBody, buildFactoryResetPreview,
+  executeServerFactoryReset, countStaged,
+} from "./factory-reset.js";
 import argon2 from "argon2";
 
 // ── Config from environment ────────────────────────────────────────────────
@@ -205,18 +214,18 @@ const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/reg
 
 // ── Hypercore / relay ──────────────────────────────────────────────────────
 
-const ownStore = new HypercoreStore(path.join(DATA_DIR, "feeds"), pubKeyHex);
+let ownStore = new HypercoreStore(path.join(DATA_DIR, "feeds"), pubKeyHex);
 await ownStore.open();
 
-const replication = new ReplicationManager(path.join(DATA_DIR, "feeds"));
+let replication = new ReplicationManager(path.join(DATA_DIR, "feeds"));
 await replication.shareOwnFeed(ownStore);
 
-const engine = new RelayQueryEngine();
+let engine = new RelayQueryEngine();
 engine.addFeed(pubKeyHex, ownStore);
 ownStore._core.on('append', () => { engine.refresh().catch(console.error); });
 
 const FOLLOWED_PATH = path.join(DATA_DIR, "followed.json");
-const followedKeys: string[] = existsSync(FOLLOWED_PATH)
+let followedKeys: string[] = existsSync(FOLLOWED_PATH)
   ? JSON.parse(readFileSync(FOLLOWED_PATH, "utf-8"))
   : [];
 
@@ -865,23 +874,62 @@ app.post<{ Body: { ids: string[] } }>("/config/sections/reorder", async (req, re
   return { sections: reordered };
 });
 
+// ── Import staging ───────────────────────────────────────────────────────────
+
+app.get("/import/staged", async (req, reply) => {
+  const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  const batches = listStagedImports(DATA_DIR).map(b => ({
+    id: b.id,
+    stagedAt: b.stagedAt,
+    stagedBy: b.stagedBy,
+    library: b.library,
+    itemCount: b.itemCount,
+    mine: b.stagedBy === user.pubKey,
+  }));
+  return reply.send({ batches });
+});
+
+app.post<{ Body: { items: ImportItemBody[]; library?: string } }>(
+  "/import/stage",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    const { items, library } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return reply.status(400).send({ error: "items array is required" });
+    }
+    const batch = createStagedImport(DATA_DIR, user.pubKey, items, library);
+    return reply.status(201).send({
+      id: batch.id,
+      stagedAt: batch.stagedAt,
+      itemCount: batch.itemCount,
+      library: batch.library,
+    });
+  },
+);
+
+app.post<{ Params: { id: string } }>(
+  "/import/commit/:id",
+  async (req, reply) => {
+    const user = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+    const batch = getStagedImport(DATA_DIR, req.params.id);
+    if (!batch) return reply.status(404).send({ error: "staged batch not found" });
+    const result = await runBatchImport(batchImportDeps(), batch.items, user.pubKey);
+    deleteStagedImport(DATA_DIR, batch.id);
+    return reply.send({ stagedId: batch.id, ...result });
+  },
+);
+
+app.delete<{ Params: { id: string } }>(
+  "/import/staged/:id",
+  async (req, reply) => {
+    if (!deleteStagedImport(DATA_DIR, req.params.id)) {
+      return reply.status(404).send({ error: "staged batch not found" });
+    }
+    return reply.send({ discarded: true });
+  },
+);
+
 // ── Batch import (scan → confirm → import) ────────────────────────────────
-
-type ImportMatchSource =
-  | { source: 'tmdb'; tmdb_id: string; media_type: 'movie' | 'tv'; title: string; year: string; poster_path?: string | null }
-  | { source: 'manual'; title: string; year: number | null; kind: 'movie' | 'series' };
-
-interface ImportItemBody {
-  kind: 'movie' | 'series';
-  files: Array<{
-    path: string; size_bytes: number; ext: string; already_ingested?: boolean;
-    parsed: { title: string; year: number | null; kind: string; season: number | null; episode: number | null };
-  }>;
-  selected_seasons?: number[] | null;
-  match: ImportMatchSource;
-  library?: string;
-  tags?: string[];
-}
 
 app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (req, reply) => {
   const importUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
@@ -889,106 +937,8 @@ app.post<{ Body: { items: ImportItemBody[] } }>("/media/import/batch", async (re
   if (!Array.isArray(items) || items.length === 0) {
     return reply.status(400).send({ error: "items array is required" });
   }
-
-  const results: Array<{ mediaNodeId: string; title: string; fileCount: number }> = [];
-  const failures: Array<{ title: string; error: string }> = [];
-
-  for (const item of items) {
-    const itemTitle = item.match.title;
-    try {
-      let mediaNodeId: string;
-
-      if (item.match.source === "tmdb") {
-        const tmdbMatch = item.match;
-        // Dedup: reuse existing media node if we already have this tmdb_id
-        const existing = engine.search({}).find(r => r.media.payload.tmdb_id === tmdbMatch.tmdb_id);
-        if (existing) {
-          mediaNodeId = existing.media.id;
-        } else {
-          // Fetch full TMDB details for metadata enrichment
-          let genres: string[] | undefined;
-          let imdbId: string | undefined;
-          let tvdbId: string | undefined;
-          let runtimeMin: number | undefined;
-          try {
-            const token = getTmdbToken(importUser.pubKey);
-            if (token) {
-              const segment = tmdbMatch.media_type === "tv" ? "tv" : "movie";
-              const res = await fetch(
-                `${TMDB_BASE}/${segment}/${tmdbMatch.tmdb_id}?append_to_response=external_ids`,
-                { headers: tmdbHeaders(token) },
-              );
-              const d = await res.json() as Record<string, unknown>;
-              genres = ((d.genres as { name: string }[] | undefined) ?? []).map(g => g.name);
-              const extIds = (d.external_ids ?? {}) as Record<string, unknown>;
-              imdbId  = (d.imdb_id ?? extIds.imdb_id) as string | undefined;
-              tvdbId  = extIds.tvdb_id ? String(extIds.tvdb_id) : undefined;
-              runtimeMin = tmdbMatch.media_type === "movie"
-                ? d.runtime as number | undefined
-                : (d.episode_run_time as number[] | undefined)?.[0];
-            }
-          } catch { /* proceed without enrichment */ }
-
-          const kind = tmdbMatch.media_type === "tv" ? "series" : "movie";
-          const node = await createMediaNode(privKeyHex, {
-            title: tmdbMatch.title,
-            year: parseInt(tmdbMatch.year) || 0,
-            kind,
-            tmdb_id: tmdbMatch.tmdb_id,
-            imdb_id: imdbId,
-            tvdb_id: tvdbId,
-            genres,
-            duration_ms: runtimeMin ? runtimeMin * 60_000 : undefined,
-            poster_path: tmdbMatch.poster_path ?? undefined,
-            library: item.library,
-            tags: item.tags,
-          });
-          await ownStore.append(node);
-          mediaNodeId = node.id;
-        }
-      } else {
-        const kind = item.kind === "series" ? "series" : "movie";
-        const node = await createMediaNode(privKeyHex, {
-          title: item.match.title,
-          year: item.match.year ?? 0,
-          kind,
-          library: item.library,
-          tags: item.tags,
-        });
-        await ownStore.append(node);
-        mediaNodeId = node.id;
-      }
-
-      // Ingest files and create storage_pointer nodes
-      let fileCount = 0;
-      for (const file of item.files) {
-        if (file.already_ingested) continue;
-        try {
-          const { fileNode } = await ingestFile(file.path, {
-            label: file.parsed.title || path.basename(file.path),
-          });
-          const storageNode = await createStoragePointerNode(privKeyHex, {
-            media_node_id: mediaNodeId,
-            endpoint_url: `/stream/${fileNode.id}`,
-            content_hash: fileNode.payload.content_hash as string,
-            size_bytes: file.size_bytes,
-            encoding: guessEncoding(file.path),
-            container: file.ext.replace(".", "") || "mkv",
-            available: true,
-          });
-          await ownStore.append(storageNode);
-          fileCount++;
-        } catch { /* individual file failure doesn't abort the item */ }
-      }
-
-      results.push({ mediaNodeId, title: itemTitle, fileCount });
-    } catch (err) {
-      failures.push({ title: itemTitle, error: err instanceof Error ? err.message : "import failed" });
-    }
-  }
-
-  await engine.refresh();
-  return reply.send({ imported: results.length, failed: failures.length, results, failures });
+  const result = await runBatchImport(batchImportDeps(), items, importUser.pubKey);
+  return reply.send(result);
 });
 
 // ── TMDB proxy (reads token from PV config) ───────────────────────────────
@@ -1525,6 +1475,93 @@ app.get<{ Params: { nodeId: string } }>("/stream/:nodeId", async (req, reply) =>
 
 // ── Admin / forest inspector ──────────────────────────────────────────────
 
+app.get("/admin/factory-reset/preview", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
+  const invites = loadInvites();
+  return reply.send(buildFactoryResetPreview({
+    engineSize: engine.size,
+    users: [...usersMap.values()],
+    inviteCount: invites.filter(i => !i.used).length,
+    stagedCount: countStaged(DATA_DIR),
+    followedCount: followedKeys.length,
+    libraryCount: (serverKey.libraries ?? []).length,
+  }));
+});
+
+app.post<{
+  Body: {
+    confirmation_phrase?: string;
+    acknowledge_irreversible?: boolean;
+    acknowledge_remove_all_members?: boolean;
+    acknowledge_remove_pvfs_inventory?: boolean;
+  };
+}>("/admin/factory-reset", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
+
+  const body = req.body ?? {};
+  const validationErr = validateFactoryResetBody({
+    confirmation_phrase: body.confirmation_phrase ?? "",
+    acknowledge_irreversible: body.acknowledge_irreversible === true,
+    acknowledge_remove_all_members: body.acknowledge_remove_all_members === true,
+    acknowledge_remove_pvfs_inventory: body.acknowledge_remove_pvfs_inventory === true,
+  });
+  if (validationErr) return reply.status(400).send({ error: validationErr });
+
+  try {
+    const result = await executeServerFactoryReset({
+      dataDir: DATA_DIR,
+      pubKeyHex,
+      catalog: { ownStore, engine, replication },
+      pv,
+      body: {
+        confirmation_phrase: body.confirmation_phrase!,
+        acknowledge_irreversible: true,
+        acknowledge_remove_all_members: true,
+        acknowledge_remove_pvfs_inventory: true,
+      },
+      getUsers: () => [...usersMap.values()],
+      setUsers: (users) => {
+        usersMap.clear();
+        for (const u of users) usersMap.set(u.pubKey, u as UserRecord);
+        serverKey.users = users as UserRecord[];
+        saveServerKey(serverKey);
+      },
+      getOwnerPubKey,
+      clearInvites: () => {
+        const n = loadInvites().length;
+        saveInvites([]);
+        return n;
+      },
+      clearFollowed: async () => {
+        const n = followedKeys.length;
+        for (const key of [...followedKeys]) {
+          engine.removeFeed(key);
+          await replication.unfollow(key);
+        }
+        followedKeys = [];
+        writeFileSync(FOLLOWED_PATH, "[]", { mode: 0o600 });
+        return n;
+      },
+      clearServerSettings: (ownerPub) => {
+        serverKey.userSettings = { [ownerPub]: {} };
+        serverKey.libraries = [];
+        saveServerKey(serverKey);
+      },
+      clearSessions: () => { sessions.clear(); },
+    });
+    ownStore = result.catalog.ownStore;
+    engine = result.catalog.engine;
+    replication = result.catalog.replication;
+    return reply.send(result);
+  } catch (err) {
+    return reply.status(500).send({
+      error: err instanceof Error ? err.message : "factory reset failed",
+    });
+  }
+});
+
 app.get("/admin/stats", async (req, reply) => {
   const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
   if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
@@ -1605,6 +1642,18 @@ app.log.info(`feed: ${ownStore.feedKey.toString("hex").slice(0, 16)}...`);
 app.log.info(`PhraseVault: ${PV_URL}`);
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+function batchImportDeps() {
+  return {
+    engine,
+    ownStore,
+    privKeyHex,
+    ingestFile,
+    getTmdbToken,
+    tmdbHeaders,
+    guessEncoding,
+  };
+}
 
 async function ingestFile(filePath: string, opts: { label?: string; mediaNodeId?: string } = {}) {
   const stats = await import("fs/promises").then(fs => fs.stat(filePath));
