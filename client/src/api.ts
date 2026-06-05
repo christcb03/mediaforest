@@ -289,6 +289,29 @@ async function postPublic<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+export interface AdminStats {
+  feedKey: string;
+  storeBlocks: number;
+  byType: { media: number; storage_pointer: number; crosslink: number; watchlist_entry: number; unknown: number };
+  engineIndexed: number;
+}
+
+export interface RawNode {
+  id: string;
+  type: string;
+  author: string;
+  sig: string;
+  ts: number;
+  payload: Record<string, unknown>;
+}
+
+export interface AdminNodesResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  nodes: RawNode[];
+}
+
 export interface PlexSection {
   key: string;
   title: string;
@@ -384,4 +407,14 @@ export const api = {
   plexImport: (body: { sectionKey: string; library?: string; syncWatchStatus?: boolean; tags?: string[] }) =>
     post<PlexImportResult>('/plex/import', body),
   plexSyncWatch: () => post<{ updated: number; skipped: number }>('/plex/sync-watch', {}),
+  // Admin
+  adminStats: () => get<AdminStats>('/admin/stats'),
+  adminNodes: (params: { type?: string; q?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.type)              qs.set('type', params.type);
+    if (params.q)                 qs.set('q', params.q);
+    if (params.offset != null)    qs.set('offset', String(params.offset));
+    if (params.limit != null)     qs.set('limit', String(params.limit));
+    return get<AdminNodesResponse>(`/admin/nodes?${qs}`);
+  },
 };

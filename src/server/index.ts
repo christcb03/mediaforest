@@ -198,7 +198,7 @@ const PUBLIC_ROUTES = new Set(["/health"]);
 const API_PREFIXES = [
   "/search", "/media", "/storage", "/crosslink", "/watchlist",
   "/follow", "/following", "/identity", "/auth", "/tmdb",
-  "/pvfs", "/config", "/stream", "/libraries", "/plex",
+  "/pvfs", "/config", "/stream", "/libraries", "/plex", "/admin",
 ];
 // Auth sub-routes that are public (no Bearer token required)
 const PUBLIC_AUTH_PATHS = new Set(["/auth/challenge", "/auth/verify", "/auth/register", "/auth/status", "/auth/login-users", "/auth/recover", "/auth/login-password"]);
@@ -1548,6 +1548,55 @@ app.get<{ Params: { nodeId: string } }>("/stream/:nodeId", async (req, reply) =>
   }
   reply.header("Content-Length", totalSize);
   return reply.send(createReadStream(filePath));
+});
+
+// ── Admin / forest inspector ──────────────────────────────────────────────
+
+app.get("/admin/stats", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
+
+  const counts: Record<string, number> = { media: 0, storage_pointer: 0, crosslink: 0, watchlist_entry: 0, unknown: 0 };
+  for await (const node of ownStore.list()) {
+    const t = node.type;
+    if (t in counts) counts[t]++;
+    else counts.unknown++;
+  }
+
+  return {
+    feedKey: ownStore.feedKey.toString("hex"),
+    storeBlocks: ownStore.length,
+    byType: counts,
+    engineIndexed: engine.size,
+  };
+});
+
+app.get<{
+  Querystring: { type?: string; q?: string; offset?: string; limit?: string };
+}>("/admin/nodes", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
+
+  const { type, q, offset: offsetStr = "0", limit: limitStr = "50" } = req.query;
+  const offset = Math.max(0, parseInt(offsetStr, 10) || 0);
+  const limit = Math.min(200, Math.max(1, parseInt(limitStr, 10) || 50));
+
+  const all = [];
+  for await (const node of ownStore.list()) {
+    if (type && node.type !== type) continue;
+    if (q) {
+      const haystack = (JSON.stringify(node.payload) + " " + node.id).toLowerCase();
+      if (!haystack.includes(q.toLowerCase())) continue;
+    }
+    all.push(node);
+  }
+
+  return {
+    total: all.length,
+    offset,
+    limit,
+    nodes: all.slice(offset, offset + limit),
+  };
 });
 
 // ── Static files + SPA fallback ────────────────────────────────────────────
