@@ -1117,6 +1117,42 @@ app.post<{
   const byTmdbId = new Map(existingMedia.filter(r => r.media.payload.tmdb_id).map(r => [r.media.payload.tmdb_id, r.media.id]));
   const byTitleYear = new Map(existingMedia.map(r => [`${r.media.payload.title}::${r.media.payload.year}`, r.media.id]));
 
+  // Pre-fetch TMDB enrichment for all new items in parallel batches
+  type TmdbEnrichment = { genres?: string[]; imdbId?: string; tvdbId?: string; posterPath?: string | null };
+  const tmdbCache = new Map<string, TmdbEnrichment>();
+  if (tmdbToken) {
+    const TMDB_CONCURRENCY = 8;
+    const TMDB_TIMEOUT_MS = 10_000;
+    const needsEnrichment = items.filter(item =>
+      item.tmdbId &&
+      !byTmdbId.has(item.tmdbId) &&
+      !byTitleYear.has(`${item.title}::${item.year}`)
+    );
+    for (let i = 0; i < needsEnrichment.length; i += TMDB_CONCURRENCY) {
+      await Promise.all(needsEnrichment.slice(i, i + TMDB_CONCURRENCY).map(async item => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TMDB_TIMEOUT_MS);
+        try {
+          const segment = item.type === "show" ? "tv" : "movie";
+          const res = await fetch(
+            `${TMDB_BASE}/${segment}/${item.tmdbId}?append_to_response=external_ids`,
+            { headers: tmdbHeaders(tmdbToken), signal: controller.signal },
+          );
+          const d = await res.json() as Record<string, unknown>;
+          const extIds = (d.external_ids ?? {}) as Record<string, unknown>;
+          tmdbCache.set(item.tmdbId!, {
+            genres: ((d.genres as { name: string }[] | undefined) ?? []).map(g => g.name),
+            imdbId: (d.imdb_id ?? extIds.imdb_id) as string | undefined,
+            tvdbId: extIds.tvdb_id ? String(extIds.tvdb_id) : undefined,
+            posterPath: d.poster_path as string | null,
+          });
+        } catch { /* proceed without TMDB enrichment for this item */ } finally {
+          clearTimeout(timer);
+        }
+      }));
+    }
+  }
+
   for (const item of items) {
     try {
       // 1. Dedup: find existing media node by tmdb_id or title+year
@@ -1131,28 +1167,12 @@ app.post<{
       let action = "skipped";
 
       if (!mediaNodeId) {
-        // 2. Enrich from TMDB if we have an ID
-        let genres: string[] | undefined;
-        let imdbId = item.imdbId;
-        let tvdbId = item.tvdbId;
-        let posterPath = item.thumb;
-        let tmdbPosterPath: string | null | undefined;
-
-        if (item.tmdbId && tmdbToken) {
-          try {
-            const segment = item.type === "show" ? "tv" : "movie";
-            const res = await fetch(
-              `${TMDB_BASE}/${segment}/${item.tmdbId}?append_to_response=external_ids`,
-              { headers: tmdbHeaders(tmdbToken) },
-            );
-            const d = await res.json() as Record<string, unknown>;
-            genres = ((d.genres as { name: string }[] | undefined) ?? []).map(g => g.name);
-            const extIds = (d.external_ids ?? {}) as Record<string, unknown>;
-            if (!imdbId) imdbId = (d.imdb_id ?? extIds.imdb_id) as string | undefined;
-            if (!tvdbId) tvdbId = extIds.tvdb_id ? String(extIds.tvdb_id) : undefined;
-            tmdbPosterPath = d.poster_path as string | null;
-          } catch { /* proceed without TMDB enrichment */ }
-        }
+        // 2. Use pre-fetched TMDB enrichment if available
+        const tmdb = item.tmdbId ? tmdbCache.get(item.tmdbId) : undefined;
+        let genres = tmdb?.genres;
+        let imdbId = tmdb?.imdbId ?? item.imdbId;
+        let tvdbId = tmdb?.tvdbId ?? item.tvdbId;
+        let tmdbPosterPath = tmdb?.posterPath;
 
         const kind = item.type === "show" ? "series" : "movie";
         const mediaNode = await createMediaNode(privKeyHex, {
