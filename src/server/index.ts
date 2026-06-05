@@ -1550,7 +1550,7 @@ app.post<{
     ownStore = result.catalog.ownStore;
     engine = result.catalog.engine;
     replication = result.catalog.replication;
-    return reply.send(result);
+    return reply.send({ ok: result.ok, summary: result.summary });
   } catch (err) {
     req.log.error({ err }, "factory reset failed");
     const message = err instanceof Error ? err.message : "factory reset failed";
