@@ -55,8 +55,10 @@ export function buildFactoryResetPreview(opts: {
   return {
     warning:
       'This permanently deletes the shared media catalog, all member accounts, invites, staged imports, '
-      + 'followed feeds, and the PhraseVault file inventory on this server. The owner account remains '
-      + 'but loses catalog data and per-user settings. This cannot be undone.',
+      + 'followed feeds, and PhraseVault file registrations on this server. The owner account remains '
+      + 'but loses catalog data and per-user settings. This cannot be undone. '
+      + 'It does NOT delete media files from disk or NAS (file:// library paths are untouched); '
+      + 'only metadata and any blobs in PhraseVault\'s PVFS store are cleared.',
     confirmation_phrase_required: FACTORY_RESET_PHRASE,
     hypercore_nodes: opts.engineSize,
     member_accounts: members,
@@ -70,7 +72,7 @@ export function buildFactoryResetPreview(opts: {
       'Clear staged import batches and followed remote feeds',
       'Reset per-user settings (including owner TMDB/sections)',
       'Clear library definitions',
-      'Factory-reset PhraseVault forest DB and PVFS inventory',
+      'Factory-reset PhraseVault forest DB and PVFS store (not file:// media on disk)',
       'Invalidate all login sessions',
     ],
   };
@@ -90,11 +92,17 @@ export async function reinitializeCatalog(
   const feedsDir = path.join(dataDir, 'feeds');
   const ownFeedPath = path.join(feedsDir, pubKeyHex);
 
-  await prev.ownStore.close();
+  // Close replication first (it closes all managed feeds, including ownStore).
   await prev.replication.close();
 
   if (existsSync(ownFeedPath)) {
-    rmSync(ownFeedPath, { recursive: true, force: true });
+    try {
+      rmSync(ownFeedPath, { recursive: true, force: true });
+    } catch (err) {
+      throw new Error(
+        `Could not remove catalog feed at ${ownFeedPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   const { HypercoreStore } = await import('../store/hypercore.js');
@@ -134,6 +142,23 @@ export async function executeServerFactoryReset(opts: {
   const ownerPub = opts.getOwnerPubKey();
   if (!ownerPub) throw new Error('no owner configured');
 
+  // PhraseVault first — if this fails, MediaForest catalog is left untouched.
+  let pvSummary: unknown = null;
+  if (opts.body.acknowledge_remove_pvfs_inventory) {
+    try {
+      pvSummary = await opts.pv.factoryReset({
+        confirmation_phrase: opts.body.confirmation_phrase,
+        acknowledge_irreversible: opts.body.acknowledge_irreversible,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `PhraseVault factory reset failed (${detail}). `
+        + 'Ensure PhraseVault is running the latest image with POST /admin/factory-reset.',
+      );
+    }
+  }
+
   const stagedRemoved = clearAllStagedImports(opts.dataDir);
   const followedBefore = await opts.clearFollowed();
 
@@ -143,11 +168,6 @@ export async function executeServerFactoryReset(opts: {
   opts.clearInvites();
   opts.clearServerSettings(ownerPub);
   opts.clearSessions();
-
-  let pvSummary: unknown = null;
-  if (opts.body.acknowledge_remove_pvfs_inventory) {
-    pvSummary = await opts.pv.factoryReset(opts.body);
-  }
 
   const newCatalog = await reinitializeCatalog(opts.dataDir, opts.pubKeyHex, opts.catalog);
 

@@ -1536,10 +1536,6 @@ app.post<{
       },
       clearFollowed: async () => {
         const n = followedKeys.length;
-        for (const key of [...followedKeys]) {
-          engine.removeFeed(key);
-          await replication.unfollow(key);
-        }
         followedKeys = [];
         writeFileSync(FOLLOWED_PATH, "[]", { mode: 0o600 });
         return n;
@@ -1556,9 +1552,9 @@ app.post<{
     replication = result.catalog.replication;
     return reply.send(result);
   } catch (err) {
-    return reply.status(500).send({
-      error: err instanceof Error ? err.message : "factory reset failed",
-    });
+    req.log.error({ err }, "factory reset failed");
+    const message = err instanceof Error ? err.message : "factory reset failed";
+    return reply.status(500).send({ error: message, message });
   }
 });
 

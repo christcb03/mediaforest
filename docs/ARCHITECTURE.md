@@ -194,6 +194,8 @@ MediaForest uses **two separate auth layers**. Do not mix them.
 
 **Sessions are not PVNodes.** They are deployment-scoped bearer tokens so the browser does not re-sign every API call. Restarting MediaForest clears sessions; users sign in again. The **roster** of who may sign in persists in the owner’s `registered_users` branch (target) or `server_key.json` (today).
 
+**Factory reset** (owner only, Settings) removes all members, invites, catalog, PVFS registrations, and sessions; keeps the owner account and server identity keys. **Does not delete library files on disk/NAS.** See [FACTORY-RESET.md](FACTORY-RESET.md).
+
 **Invites** gate registration in closed mode only. An invite does not create an account by itself — the user still completes `/auth/register` with their `pubKey`. Target: invites can remain app-local (simple, expiring) or become signed nodes under `server_policy`.
 
 ### Registration flow (closed mode)
@@ -272,8 +274,8 @@ This repository **does not yet** implement the target model end-to-end. Today:
 | Config / user roster trees | **`server_key.json`** + in-memory sessions |
 | Collection trees | **`library` field** on media payload + sections in `userSettings` JSON |
 | Primary PVFS ordered tree | MF uses **`POST /pvfs/ingest`** + dedup via **`GET /pvfs/locations`**; stream proxied from PV |
-| Import staging | **`POST /import/stage`** → **`POST /import/commit/:id`** (`staged_imports.json`) |
-| Owner factory reset | **`POST /admin/factory-reset`** (typed phrase + acknowledgements); wipes MF catalog + PV forest |
+| Import staging | **Implemented** — **`POST /import/stage`** → **`POST /import/commit/:id`** (`staged_imports.json`) |
+| Owner factory reset | **Implemented** — Settings + **`POST /admin/factory-reset`**; see [FACTORY-RESET.md](FACTORY-RESET.md) |
 | Per-user PVFS trees | Not implemented |
 | Streaming via PVFS | **`GET /stream/:nodeId`** on MediaForest resolves PV metadata and reads local disk |
 | Ingest / scan jobs | **MediaForest API** (`/pvfs/scan`, in-memory jobs) — correct layer, interim API |

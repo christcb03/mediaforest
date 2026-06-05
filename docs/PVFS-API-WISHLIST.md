@@ -166,6 +166,7 @@ PVFS should **not** implement MediaForest user registration or passphrase login.
 | `GET /stream/:nodeId` | `GET /pvfs/file/:id/stream` on PV (or MF proxy + authorize) |
 | Library delete | `DELETE /pvfs/trees/primary/files/:id` + confirm local disk in UI |
 | Orphan cleanup | `GET /pvfs/orphans` → `POST /pvfs/orphans/purge` when user confirms |
+| Owner factory reset | MF `POST /admin/factory-reset` → PV `POST /admin/factory-reset`; see [FACTORY-RESET.md](FACTORY-RESET.md) — **does not delete disk media** |
 | File reference `endpoint_url` = `/stream/...` | Store PVFS file node id + PVFS stream URL template |
 
 Consumer code: [src/pv/client.ts](../src/pv/client.ts), [src/server/index.ts](../src/server/index.ts).

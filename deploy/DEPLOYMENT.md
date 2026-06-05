@@ -60,6 +60,16 @@ git push origin main  (per repo)
 - Watchtower (`watchtower-phrasevault` container) only monitors containers with `com.centurylinklabs.watchtower.enable=true` label.
 - Media library is mounted read-only from `/mnt/unionfs/Media` into both containers as `/media`.
 
+## Factory reset (owner)
+
+The owner can wipe **all server metadata** from the MediaForest UI (Settings). That calls MediaForest `POST /admin/factory-reset`, which in turn calls PhraseVault `POST /admin/factory-reset`.
+
+**Requires both containers on builds that include admin factory-reset** (PhraseVault `1fbb2cc+`, MediaForest `6dd388b+` with subsequent fixes).
+
+**Does not delete files under `/mnt/unionfs/Media`** — only catalog, users (except owner), invites, and PVFS/forest DB state.
+
+See [docs/FACTORY-RESET.md](../docs/FACTORY-RESET.md) and [PhraseVault docs/ADMIN-FACTORY-RESET.md](https://github.com/christcb03/phrasevault/blob/main/docs/ADMIN-FACTORY-RESET.md).
+
 ## Manual Re-deploy
 
 ```bash

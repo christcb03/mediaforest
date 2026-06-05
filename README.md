@@ -57,6 +57,10 @@ Go to Settings → Plex Media Server and enter your Plex server URL and token. T
 
 MediaForest is the media application layer; [PhraseVault](https://github.com/christcb03/phrasevault) is the separate platform (signed nodes, forest links, PVFS, append-only sync). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the target model and auth model; [docs/PVFS-API-WISHLIST.md](docs/PVFS-API-WISHLIST.md) for the PhraseVault PVFS API contract sketch.
 
+## Owner factory reset
+
+Wipes the shared catalog, all member accounts, PVFS registrations, and related server data for every user. **Does not delete video files on disk/NAS** — only app and PhraseVault metadata. Owner only: **Settings → Factory reset**. Full details: [docs/FACTORY-RESET.md](docs/FACTORY-RESET.md).
+
 ## Deployment
 
 See [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).

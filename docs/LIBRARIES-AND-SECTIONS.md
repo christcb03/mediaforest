@@ -209,6 +209,10 @@ Section view mode (row/grid) and section filters are configurable from Settings.
 - [x] `staged_imports.json` persistence
 - [x] `GET /import/staged`, `POST /import/stage`, `POST /import/commit/:id`, `DELETE /import/staged/:id`
 - [x] ScanPage: Stage / Import now + staged batch panel
+
+### Factory reset (owner)
+- [x] Settings UI + `POST /admin/factory-reset` — see [FACTORY-RESET.md](FACTORY-RESET.md)
+- [x] Does not delete `file://` media on disk; clears catalog, members, PVFS registrations
 - [ ] Stage/commit UI in ScanPage
 - [ ] Staged batch review panel with commit/discard
 

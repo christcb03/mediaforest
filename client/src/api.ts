@@ -9,6 +9,19 @@ function authHeaders(): Record<string, string> {
 
 export class UnauthorizedError extends Error {}
 
+/** Prefer server `error` or Fastify `message` (avoids generic "Internal Server Error"). */
+function apiErrorMessage(
+  body: { error?: string; message?: string } | null,
+  status: number,
+  statusText: string,
+): string {
+  if (!body) return `${status} ${statusText}`;
+  const msg = body.message?.trim();
+  const err = body.error?.trim();
+  if (msg && msg !== 'Internal Server Error') return msg;
+  if (err && err !== 'Internal Server Error') return err;
+  return msg || err || `${status} ${statusText}`;
+}
 
 export interface MediaSource {
   storageNodeId: string;
@@ -106,7 +119,7 @@ async function get<T>(path: string): Promise<T> {
   if (res.status === 401) throw new UnauthorizedError('session expired');
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+    throw new Error(apiErrorMessage(body, res.status, res.statusText));
   }
   return res.json();
 }
@@ -120,7 +133,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   if (res.status === 401) throw new UnauthorizedError('session expired');
   if (!res.ok) {
     const errBody = await res.json().catch(() => null);
-    throw new Error(errBody?.error ?? `${res.status} ${res.statusText}`);
+    throw new Error(apiErrorMessage(errBody, res.status, res.statusText));
   }
   return res.json();
 }
@@ -133,7 +146,7 @@ async function del<T>(path: string): Promise<T> {
   if (res.status === 401) throw new UnauthorizedError('session expired');
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+    throw new Error(apiErrorMessage(body, res.status, res.statusText));
   }
   return res.json();
 }

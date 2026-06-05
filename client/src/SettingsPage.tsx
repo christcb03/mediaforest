@@ -745,10 +745,16 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
             <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-2">
               Factory reset (entire server)
             </h2>
-            <p className="text-xs text-red-200/80 mb-4 leading-relaxed">
+            <p className="text-xs text-red-200/80 mb-3 leading-relaxed">
               Permanently deletes the shared catalog, all member accounts, invites, staged imports,
-              libraries, per-user settings, followed feeds, and the PhraseVault file inventory.
-              Your owner login remains. This cannot be undone.
+              libraries, per-user settings, followed feeds, and PhraseVault file registrations
+              (metadata only). Your owner login remains. This cannot be undone.
+            </p>
+            <p className="text-xs text-emerald-300/90 mb-4 leading-relaxed border border-emerald-900/50 rounded-lg px-3 py-2 bg-emerald-950/30">
+              Does <strong className="text-emerald-200">not</strong> delete your media library files from
+              disk or NAS (<code className="font-mono text-emerald-200/80">file://</code> paths stay on
+              the filesystem). You can scan and import again afterward. Only copies stored inside
+              PhraseVault&apos;s PVFS data directory are removed.
             </p>
             {!resetPreview ? (
               <button
@@ -791,7 +797,7 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
               {[
                 [resetAckIrreversible, setResetAckIrreversible, 'I understand this is irreversible'],
                 [resetAckMembers, setResetAckMembers, 'Delete all member accounts and invites'],
-                [resetAckPvfs, setResetAckPvfs, 'Delete all PhraseVault files and forest data on this server'],
+                [resetAckPvfs, setResetAckPvfs, 'Clear PhraseVault registrations and PVFS store (not library files on disk)'],
               ].map(([checked, setChecked, label]) => (
                 <label key={String(label)} className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
                   <input
@@ -814,7 +820,10 @@ export default function SettingsPage({ onClose, onUnauthorized, userRole }: Prop
                 || !resetAckPvfs
               }
               onClick={async () => {
-                if (!window.confirm('Last chance: wipe ALL server data for every user?')) return
+                if (!window.confirm(
+                  'Last chance: wipe all server catalog data and user accounts? '
+                  + 'Your video files on disk/NAS will NOT be deleted.',
+                )) return
                 setResetBusy(true)
                 setResetMsg(null)
                 try {
