@@ -112,7 +112,8 @@ function cleanTitle(s: string): string {
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp']
 
-function findLocalArtwork(filePath: string, title: string): string | null {
+/** Poster/folder.jpg in the same directory as the media file (for ambiguous TMDB matches). */
+export function findLocalArtwork(filePath: string, title: string): string | null {
   const dir = path.dirname(filePath)
   const safeTitle = title.replace(/[<>:"/\\|?*]/g, '').trim()
   const basenames = ['poster', 'folder', safeTitle]
@@ -184,7 +185,7 @@ export async function scanVideoFilesAsync(
   extensions: Set<string> = DEFAULT_VIDEO_EXTENSIONS,
   onProgress?: (progress: ScanWalkProgress) => void,
   onFile?: (file: ScannedFile) => boolean | void,
-  opts?: { skipArtwork?: boolean },
+  opts?: { skipArtwork?: boolean; shouldAbort?: () => string | null | undefined },
 ): Promise<ScannedFile[]> {
   const results: ScannedFile[] = []
   const skipArtwork = opts?.skipArtwork !== false
@@ -217,6 +218,9 @@ export async function scanVideoFilesAsync(
     emitProgress(current)
 
     for (const entry of entries) {
+      const abortMsg = opts?.shouldAbort?.()
+      if (abortMsg) throw new Error(abortMsg)
+
       entriesScanned++
       if (++ops % 48 === 0) await new Promise<void>(r => setImmediate(r))
 

@@ -25,7 +25,8 @@ import {
   MediaPayload, StoragePointerPayload, CrosslinkPayload, WatchlistEntryPayload,
 } from "../relay/index.js";
 import { PhraseVaultClient } from "../pv/client.js";
-import { scanVideoFilesAsync } from "../scan/scan.js";
+import { scanVideoFilesAsync, findLocalArtwork } from "../scan/scan.js";
+import { startScanWatchdog, maxEntriesWithoutNew } from "../scan/scan-watchdog.js";
 import { scoreCandidates } from "../scan/matcher.js";
 import { runBatchImport } from "../import/batch-import.js";
 import type { ImportItemBody } from "../import/types.js";
@@ -1324,27 +1325,31 @@ interface ScanJob {
   failed?: number;
   failures?: Array<{ path: string; error: string }>;
   error?: string;
+  index_warning?: string;
 }
 const scanJobs = new Map<string, ScanJob>();
 
-function persistScanProgress(
-  job: ScanJob,
-  stagedBy: string,
-): void {
+function persistScanProgress(job: ScanJob, stagedBy: string): void {
   const files = job.files as ScannedFile[];
-  upsertScanSession(DATA_DIR, job.scanPath, {
-    library: job.library,
-    status: job.status === "done" ? "complete" : "scanning",
-    files,
+  setImmediate(() => {
+    try {
+      upsertScanSession(DATA_DIR, job.scanPath, {
+        library: job.library,
+        status: job.status === "done" ? "complete" : "scanning",
+        files,
+      });
+      upsertScanStagedBatch(
+        DATA_DIR,
+        stagedBy,
+        job.scanPath,
+        job.library,
+        files,
+        job.status === "done" ? "ready" : "scan_in_progress",
+      );
+    } catch (err) {
+      console.error("persistScanProgress failed", err);
+    }
   });
-  upsertScanStagedBatch(
-    DATA_DIR,
-    stagedBy,
-    job.scanPath,
-    job.library,
-    files,
-    job.status === "done" ? "ready" : "scan_in_progress",
-  );
 }
 
 app.get<{ Querystring: { path?: string } }>("/pvfs/scan/session", async (req, reply) => {
@@ -1390,12 +1395,28 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
       : undefined;
 
     const maxNew = limit && limit > 0 ? limit : undefined;
+    const entriesCap = maxEntriesWithoutNew(maxNew);
     let lastPersist = 0;
+    let entriesAtLastNew = 0;
+
+    const watchdog = startScanWatchdog(job, (msg) => {
+      job.error = msg;
+      job.status = "error";
+    });
 
     ;(async () => {
       try {
         job.phase = "indexing";
-        const ingestedUris = await pv.getIngestedUriSet(8_000);
+        job.current_dir = "(PhraseVault file index)";
+        watchdog.touch();
+        let ingestedUris = new Set<string>();
+        const indexStart = Date.now();
+        ingestedUris = await pv.getIngestedUriSet(8_000);
+        if (Date.now() - indexStart >= 8_000) {
+          job.index_warning = "PhraseVault index was slow; continuing scan";
+        }
+
+        if (watchdog.isAborted()) return;
 
         const sessionSkip = sessionPathSet(
           resume ? priorSession : getScanSession(DATA_DIR, dirPath),
@@ -1403,13 +1424,27 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
         if (dry_run) {
           let newCount = initialFiles.length;
+          entriesAtLastNew = 0;
           job.phase = "walking";
           await scanVideoFilesAsync(dirPath, extSet, (p) => {
+            watchdog.touch();
             job.files_seen = p.videoFilesSeen;
             job.dirs_scanned = p.dirsScanned;
             job.entries_scanned = p.entriesScanned;
             job.current_dir = p.currentDir;
+            if (
+              maxNew
+              && newCount < maxNew
+              && p.entriesScanned - entriesAtLastNew > entriesCap
+            ) {
+              throw new Error(
+                `Scanned ${p.entriesScanned - entriesAtLastNew} files and folders under `
+                + `${dirPath} without finding ${maxNew} new imports. `
+                + "Most media may already be registered in PhraseVault — try a subfolder or raise the max.",
+              );
+            }
           }, (file) => {
+            if (watchdog.isAborted()) return false;
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
             if (file.already_ingested) {
               job.already_ingested_count = (job.already_ingested_count ?? 0) + 1;
@@ -1422,15 +1457,21 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
             newCount++;
             job.found = newCount;
             job.new_count = newCount;
+            entriesAtLastNew = job.entries_scanned ?? 0;
             const now = Date.now();
             if (now - lastPersist > 10_000) {
               lastPersist = now;
               persistScanProgress(job, scanUser.pubKey);
             }
-          }, { skipArtwork: true });
-          job.status = "done";
-          job.phase = undefined;
-          persistScanProgress(job, scanUser.pubKey);
+          }, {
+            skipArtwork: true,
+            shouldAbort: () => (watchdog.isAborted() ? job.error ?? "scan aborted" : null),
+          });
+          if (!watchdog.isAborted()) {
+            job.status = "done";
+            job.phase = undefined;
+            persistScanProgress(job, scanUser.pubKey);
+          }
           return;
         }
 
@@ -1462,8 +1503,12 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
         job.failed = failures.length; job.failures = failures;
         job.status = "done";
       } catch (err) {
-        job.error = err instanceof Error ? err.message : "scan failed";
-        job.status = "error";
+        if (job.status !== "error") {
+          job.error = err instanceof Error ? err.message : "scan failed";
+          job.status = "error";
+        }
+      } finally {
+        watchdog.stop();
       }
     })();
 
@@ -1548,7 +1593,17 @@ app.get("/pvfs/unimported", async (_req, reply) => {
 
 // ── Media match (TMDB + confidence scoring) ───────────────────────────────
 
-app.post<{ Body: { items: Array<{ title: string; year: number | null; kind: "movie" | "series" | "unknown" }>; threshold?: number } }>(
+app.post<{
+  Body: {
+    items: Array<{
+      title: string;
+      year: number | null;
+      kind: "movie" | "series" | "unknown";
+      sample_path?: string;
+    }>;
+    threshold?: number;
+  };
+}>(
   "/media/match/search",
   async (req, reply) => {
     const matchUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
@@ -1579,9 +1634,24 @@ app.post<{ Body: { items: Array<{ title: string; year: number | null; kind: "mov
               overview: (r.overview as string | null) ?? null,
             };
           });
-        results.push(scoreCandidates(item, raw, threshold));
+        const scored = scoreCandidates(item, raw, threshold);
+        let local_artwork_path: string | null = null;
+        if (item.sample_path && (!scored.best || scored.needs_review)) {
+          local_artwork_path = findLocalArtwork(item.sample_path, item.title);
+        }
+        results.push({ ...scored, local_artwork_path });
       } catch {
-        results.push({ query: item, candidates: [], best: null, needs_review: true });
+        let local_artwork_path: string | null = null;
+        if (item.sample_path) {
+          local_artwork_path = findLocalArtwork(item.sample_path, item.title);
+        }
+        results.push({
+          query: item,
+          candidates: [],
+          best: null,
+          needs_review: true,
+          local_artwork_path,
+        });
       }
       await new Promise(r => setTimeout(r, 100));
     }

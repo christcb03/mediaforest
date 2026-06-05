@@ -25,6 +25,8 @@ interface MatchState {
   confirmed: boolean                                   // user explicitly accepted
   overriding: boolean                                  // search override UI open
   overrideQuery: string
+  /** Same-folder poster when TMDB match is weak (from server). */
+  localArtwork?: string | null
 }
 
 type Phase = 'idle' | 'scanning' | 'ready' | 'importing' | 'done'
@@ -80,6 +82,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [newCount, setNewCount] = useState(0)
   const [alreadyCount, setAlreadyCount] = useState(0)
   const [error, setError] = useState('')
+  const [scanNotice, setScanNotice] = useState('')
   const [matchError, setMatchError] = useState('')
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
   const [stagedBatches, setStagedBatches] = useState<StagedBatchSummary[]>([])
@@ -110,7 +113,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const matchedTitlesRef = useRef(new Set<string>())   // keys already submitted for matching
   const matchInFlightRef = useRef(false)                // one match request at a time
-  const pendingMatchRef = useRef<Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown' }>>([])
+  const pendingMatchRef = useRef<Array<{
+    title: string; year: number | null; kind: 'movie' | 'series' | 'unknown'; sample_path?: string
+  }>>([])
   const detectedKindRef = useRef<'series' | 'movie'>('movie')
 
   const detectedKind = useMemo(() => {
@@ -179,7 +184,10 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       for (const q of batch) {
         const key = `${q.title}::${q.kind}`
         if (!next.has(key)) {
-          next.set(key, { status: 'pending', candidates: [], selected: null, needsReview: true, confirmed: false, overriding: false, overrideQuery: '' })
+          next.set(key, {
+            status: 'pending', candidates: [], selected: null, needsReview: true,
+            confirmed: false, overriding: false, overrideQuery: '', localArtwork: null,
+          })
         }
       }
       return next
@@ -206,6 +214,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                 confirmed: !r.needs_review,
                 overriding: false,
                 overrideQuery: '',
+                localArtwork: r.local_artwork_path ?? null,
               })
             }
           })
@@ -241,7 +250,12 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       const key = `${f.parsed.title}::${matchKind}`
       if (!matchedTitlesRef.current.has(key)) {
         matchedTitlesRef.current.add(key)
-        newQueries.push({ title: f.parsed.title, year: f.parsed.year, kind: matchKind })
+        newQueries.push({
+          title: f.parsed.title,
+          year: f.parsed.year,
+          kind: matchKind,
+          sample_path: f.path,
+        })
       }
     }
     if (newQueries.length > 0) {
@@ -252,6 +266,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
 
   async function handleScan() {
     setError('')
+    setScanNotice('')
     setScanFiles([])
     setSelectedShows(new Map())
     setSelectedMovies(new Set())
@@ -303,6 +318,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             autoSelectNew(newFiles)
             queueNewTitlesForMatching(newFiles)
           }
+
+          if (res.index_warning) setScanNotice(res.index_warning)
 
           if (res.status !== 'running') {
             if (pollRef.current) clearInterval(pollRef.current)
@@ -755,6 +772,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           </div>
         )}
 
+        {scanNotice && (
+          <p className="text-amber-300/90 text-sm mb-4">{scanNotice}</p>
+        )}
         {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
 
         {matchError && (
@@ -941,7 +961,7 @@ function ShowCard({ show, matchState, selected, selectedSeasons, onToggleShow, o
             onChange={onToggleShow}
             className="mt-1 accent-indigo-500"
           />
-          <Poster src={show.localArtwork ? `/pvfs/artwork?path=${encodeURIComponent(show.localArtwork)}` : null} />
+          <Poster src={resolvePosterSrc(show.localArtwork, matchState)} />
         </div>
 
         {/* Show info + season pills */}
@@ -1013,7 +1033,7 @@ function MovieRow({ file, matchState, selected, onToggle, onConfirmMatch, onManu
         disabled={!!file.already_ingested}
         className="accent-indigo-500 shrink-0"
       />
-      <Poster src={file.local_artwork ? `/pvfs/artwork?path=${encodeURIComponent(file.local_artwork)}` : null} small />
+      <Poster src={resolvePosterSrc(file.local_artwork, matchState, true)} small />
       <div className="flex-1 min-w-0">
         <span className="text-sm text-white">{file.parsed.title || '(unknown)'}</span>
         {file.parsed.year && <span className="text-xs text-gray-500 ml-2">{file.parsed.year}</span>}
@@ -1070,13 +1090,20 @@ function MatchColumn({ matchState, kind: _kind, onConfirm, onManual, onSelect, o
       {/* Selected match display */}
       {selected ? (
         <div className="flex items-center gap-2">
-          {selected.poster_path && (
+          {(needsReview && matchState.localArtwork) ? (
+            <img
+              src={`/pvfs/artwork?path=${encodeURIComponent(matchState.localArtwork)}`}
+              alt=""
+              title="Local folder poster"
+              className="w-8 h-12 object-cover rounded shrink-0"
+            />
+          ) : selected.poster_path ? (
             <img
               src={`${TMDB_IMG}${selected.poster_path}`}
               alt=""
               className="w-8 h-12 object-cover rounded shrink-0"
             />
-          )}
+          ) : null}
           <div className="min-w-0">
             <div className="text-xs text-white font-medium truncate">{selected.title}</div>
             {selected.year && <div className="text-xs text-gray-500">{selected.year}</div>}
@@ -1087,6 +1114,16 @@ function MatchColumn({ matchState, kind: _kind, onConfirm, onManual, onSelect, o
         </div>
       ) : confirmed ? (
         <div className="text-xs text-gray-500 italic">Manual / no match</div>
+      ) : needsReview && matchState.localArtwork ? (
+        <div className="flex items-center gap-2">
+          <img
+            src={`/pvfs/artwork?path=${encodeURIComponent(matchState.localArtwork)}`}
+            alt=""
+            title="Local folder poster (TMDB uncertain)"
+            className="w-8 h-12 object-cover rounded shrink-0"
+          />
+          <span className="text-xs text-amber-400/90">Local poster</span>
+        </div>
       ) : null}
 
       {/* Action buttons */}
@@ -1143,6 +1180,19 @@ function MatchColumn({ matchState, kind: _kind, onConfirm, onManual, onSelect, o
       )}
     </div>
   )
+}
+
+function resolvePosterSrc(
+  fileArtwork: string | null | undefined,
+  matchState: MatchState | undefined,
+  preferMatchLocal = false,
+): string | null {
+  if (matchState?.localArtwork && (preferMatchLocal || matchState.needsReview)) {
+    return `/pvfs/artwork?path=${encodeURIComponent(matchState.localArtwork)}`
+  }
+  if (fileArtwork) return `/pvfs/artwork?path=${encodeURIComponent(fileArtwork)}`
+  if (matchState?.selected?.poster_path) return `${TMDB_IMG}${matchState.selected.poster_path}`
+  return null
 }
 
 // ── Poster ────────────────────────────────────────────────────────────────────

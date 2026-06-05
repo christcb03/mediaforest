@@ -15,6 +15,8 @@ export interface MatchSearchResult {
   candidates: MatchCandidate[]
   best: MatchCandidate | null
   needs_review: boolean
+  /** Same-folder poster when TMDB match is weak or missing. */
+  local_artwork_path?: string | null
 }
 
 function normalizeTitle(s: string): string {

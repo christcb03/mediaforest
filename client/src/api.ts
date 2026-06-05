@@ -218,6 +218,7 @@ export interface MatchSearchResult {
   candidates: MatchCandidate[];
   best: MatchCandidate | null;
   needs_review: boolean;
+  local_artwork_path?: string | null;
 }
 
 export type MatchSource =
@@ -410,6 +411,7 @@ export const api = {
       failed?: number;
       failures?: Array<{ path: string; error: string }>;
       error?: string;
+      index_warning?: string;
     }>(`/pvfs/scan/job/${jobId}`),
   pvfsScanDiagnose: (path: string) =>
     get<{ exists: boolean; path: string; sample?: Array<{ name: string; type: string }>; totalEntries?: number; error?: string }>(
@@ -419,7 +421,10 @@ export const api = {
     get<{ session: ScanSessionSnapshot | null }>(`/pvfs/scan/session?path=${encodeURIComponent(path)}`),
   autosaveScanStage: (body: { path: string; library?: string; items?: ImportItem[] }) =>
     put<{ id: string; itemCount: number; scanFileCount: number }>('/import/stage/scan', body),
-  matchSearch: (body: { items: Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown' }>; threshold?: number }) =>
+  matchSearch: (body: {
+    items: Array<{ title: string; year: number | null; kind: 'movie' | 'series' | 'unknown'; sample_path?: string }>;
+    threshold?: number;
+  }) =>
     post<{ results: MatchSearchResult[]; threshold: number }>('/media/match/search', body),
   importBatch: (body: { items: ImportItem[]; library?: string; tags?: string[] }) =>
     post<ImportResult>('/media/import/batch', body),
