@@ -239,8 +239,8 @@ function NodeRow({ node, expanded, onToggle, onSearchRelated }: {
           {node.type}
         </span>
         <span className="text-sm text-gray-200 flex-1 min-w-0 truncate">{nodeLabel(node)}</span>
-        {p.library && (
-          <span className="text-xs text-gray-600 shrink-0">{p.library as string}</span>
+        {!!p.library && (
+          <span className="text-xs text-gray-600 shrink-0">{String(p.library)}</span>
         )}
         <span className="font-mono text-xs text-gray-700 shrink-0">{node.id.slice(0, 8)}…</span>
         <span className="text-gray-600 text-xs shrink-0">{expanded ? '▲' : '▼'}</span>
@@ -256,11 +256,11 @@ function NodeRow({ node, expanded, onToggle, onSearchRelated }: {
               >
                 Find related nodes →
               </button>
-              {p.tmdb_id && (
-                <span className="text-xs text-gray-500 self-center">TMDB: {p.tmdb_id as string}</span>
+              {!!p.tmdb_id && (
+                <span className="text-xs text-gray-500 self-center">TMDB: {String(p.tmdb_id)}</span>
               )}
-              {p.imdb_id && (
-                <span className="text-xs text-gray-500 self-center">IMDb: {p.imdb_id as string}</span>
+              {!!p.imdb_id && (
+                <span className="text-xs text-gray-500 self-center">IMDb: {String(p.imdb_id)}</span>
               )}
             </div>
           )}
