@@ -172,22 +172,54 @@ export function scanVideoFiles(
 // each directory so the event loop isn't blocked while waiting on NFS I/O.
 // onFile fires for every discovered file — use it to stream results to a job
 // object without waiting for the full scan to finish. Return false to stop walking.
+export interface ScanWalkProgress {
+  videoFilesSeen: number;
+  dirsScanned: number;
+  entriesScanned: number;
+  currentDir: string;
+}
+
 export async function scanVideoFilesAsync(
   dir: string,
   extensions: Set<string> = DEFAULT_VIDEO_EXTENSIONS,
-  onProgress?: (found: number) => void,
+  onProgress?: (progress: ScanWalkProgress) => void,
   onFile?: (file: ScannedFile) => boolean | void,
+  opts?: { skipArtwork?: boolean },
 ): Promise<ScannedFile[]> {
   const results: ScannedFile[] = []
+  const skipArtwork = opts?.skipArtwork !== false
+  let dirsScanned = 0
+  let entriesScanned = 0
+  let ops = 0
 
-  async function walk(current: string): Promise<boolean> {
+  const emitProgress = (currentDir: string) => {
+    onProgress?.({
+      videoFilesSeen: results.length,
+      dirsScanned,
+      entriesScanned,
+      currentDir,
+    })
+  }
+
+  async function walk(current: string, isRoot = false): Promise<boolean> {
     let entries: string[]
     try {
       entries = await readdir(current)
-    } catch {
+    } catch (err) {
+      if (isRoot) {
+        throw new Error(
+          `Cannot read directory ${current}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
       return false
     }
+    dirsScanned++
+    emitProgress(current)
+
     for (const entry of entries) {
+      entriesScanned++
+      if (++ops % 48 === 0) await new Promise<void>(r => setImmediate(r))
+
       const fullPath = path.join(current, entry)
       let st
       try {
@@ -201,16 +233,22 @@ export async function scanVideoFilesAsync(
         const ext = path.extname(entry).toLowerCase()
         if (extensions.has(ext)) {
           const parsed = parseMediaPath(fullPath)
-          const file: ScannedFile = { path: fullPath, size_bytes: st.size, ext, parsed, local_artwork: findLocalArtwork(fullPath, parsed.title) }
+          const file: ScannedFile = {
+            path: fullPath,
+            size_bytes: st.size,
+            ext,
+            parsed,
+            local_artwork: skipArtwork ? null : findLocalArtwork(fullPath, parsed.title),
+          }
           if (onFile?.(file) === false) return true
           results.push(file)
-          if (onProgress) onProgress(results.length)
+          emitProgress(current)
         }
       }
     }
     return false
   }
 
-  await walk(dir)
+  await walk(dir, true)
   return results
 }

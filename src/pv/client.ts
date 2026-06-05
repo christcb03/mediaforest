@@ -256,12 +256,31 @@ export class PhraseVaultClient {
     );
   }
 
-  /** All known file:// URIs (for scan dedup). */
-  async getIngestedUriSet(): Promise<Set<string>> {
+  /** All known file:// URIs (for scan dedup). Times out rather than blocking scan. */
+  async getIngestedUriSet(timeoutMs = 8_000): Promise<Set<string>> {
     const set = new Set<string>();
-    const resp = await this.get<{ nodes: Array<{ payload: { uri?: string } }> }>("/pvfs/locations");
-    for (const n of resp.nodes ?? []) {
-      if (n.payload?.uri) set.add(n.payload.uri);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/pvfs/locations`, {
+        headers: await this.authHeaders(),
+        signal: controller.signal,
+      });
+      if (res.status === 401) {
+        this.token = null;
+        clearTimeout(timer);
+        return this.getIngestedUriSet(timeoutMs);
+      }
+      if (!res.ok) return set;
+      type LocResp = { nodes: Array<{ payload: { uri?: string } }> };
+      const resp = (await res.json()) as LocResp;
+      for (const n of resp.nodes ?? []) {
+        if (n.payload?.uri) set.add(n.payload.uri);
+      }
+    } catch {
+      /* PV slow/unavailable — scan proceeds without dedup */
+    } finally {
+      clearTimeout(timer);
     }
     return set;
   }

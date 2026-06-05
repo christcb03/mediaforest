@@ -395,7 +395,11 @@ export const api = {
   pvfsScanJob: (jobId: string) =>
     get<{
       status: 'running' | 'done' | 'error';
-      files_seen: number;
+      phase?: 'indexing' | 'walking';
+      files_seen?: number;
+      dirs_scanned?: number;
+      entries_scanned?: number;
+      current_dir?: string;
       found: number;
       new_count?: number;
       already_ingested_count?: number;
@@ -407,6 +411,10 @@ export const api = {
       failures?: Array<{ path: string; error: string }>;
       error?: string;
     }>(`/pvfs/scan/job/${jobId}`),
+  pvfsScanDiagnose: (path: string) =>
+    get<{ exists: boolean; path: string; sample?: Array<{ name: string; type: string }>; totalEntries?: number; error?: string }>(
+      `/pvfs/scan/diagnose?path=${encodeURIComponent(path)}`,
+    ),
   getScanSession: (path: string) =>
     get<{ session: ScanSessionSnapshot | null }>(`/pvfs/scan/session?path=${encodeURIComponent(path)}`),
   autosaveScanStage: (body: { path: string; library?: string; items?: ImportItem[] }) =>

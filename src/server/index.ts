@@ -1308,8 +1308,12 @@ interface ScanJob {
   dry_run: boolean;
   scanPath: string;
   library?: string;
-  /** Video files examined on disk (includes already in library). */
+  phase?: "indexing" | "walking";
+  /** Video files examined on disk. */
   files_seen: number;
+  dirs_scanned?: number;
+  entries_scanned?: number;
+  current_dir?: string;
   /** New files collected this run (not in PhraseVault / prior scan session). */
   found: number;
   new_count?: number;
@@ -1390,10 +1394,8 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
     ;(async () => {
       try {
-        let ingestedUris = new Set<string>();
-        try {
-          ingestedUris = await pv.getIngestedUriSet();
-        } catch { /* PV not available, proceed without dedup */ }
+        job.phase = "indexing";
+        const ingestedUris = await pv.getIngestedUriSet(8_000);
 
         const sessionSkip = sessionPathSet(
           resume ? priorSession : getScanSession(DATA_DIR, dirPath),
@@ -1401,8 +1403,12 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
 
         if (dry_run) {
           let newCount = initialFiles.length;
-          await scanVideoFilesAsync(dirPath, extSet, (seen) => {
-            job.files_seen = seen;
+          job.phase = "walking";
+          await scanVideoFilesAsync(dirPath, extSet, (p) => {
+            job.files_seen = p.videoFilesSeen;
+            job.dirs_scanned = p.dirsScanned;
+            job.entries_scanned = p.entriesScanned;
+            job.current_dir = p.currentDir;
           }, (file) => {
             file.already_ingested = ingestedUris.has(`file://${file.path}`);
             if (file.already_ingested) {
@@ -1417,17 +1423,23 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
             job.found = newCount;
             job.new_count = newCount;
             const now = Date.now();
-            if (now - lastPersist > 3000) {
+            if (now - lastPersist > 10_000) {
               lastPersist = now;
               persistScanProgress(job, scanUser.pubKey);
             }
-          });
+          }, { skipArtwork: true });
           job.status = "done";
+          job.phase = undefined;
           persistScanProgress(job, scanUser.pubKey);
           return;
         }
 
-        const files = await scanVideoFilesAsync(dirPath, extSet, n => { job.found = n; });
+        job.phase = "walking";
+        const files = await scanVideoFilesAsync(dirPath, extSet, p => {
+          job.files_seen = p.videoFilesSeen;
+          job.dirs_scanned = p.dirsScanned;
+          job.current_dir = p.currentDir;
+        }, undefined, { skipArtwork: true });
         const batch = limit ? files.slice(0, limit) : files;
         for (const f of batch) f.already_ingested = ingestedUris.has(`file://${f.path}`);
         const newFiles = batch.filter(f => !f.already_ingested);
@@ -1463,6 +1475,31 @@ app.get<{ Params: { jobId: string } }>("/pvfs/scan/job/:jobId", async (req, repl
   const job = scanJobs.get(req.params.jobId);
   if (!job) return reply.status(404).send({ error: "job not found" });
   return reply.send(job);
+});
+
+/** Quick path check (lists one directory level). */
+app.get<{ Querystring: { path?: string } }>("/pvfs/scan/diagnose", async (req, reply) => {
+  const dirPath = req.query.path;
+  if (!dirPath) return reply.status(400).send({ error: "path query is required" });
+  if (!existsSync(dirPath)) {
+    return reply.send({ exists: false, path: dirPath, sample: [] as string[] });
+  }
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(dirPath, { withFileTypes: true });
+    const sample = entries.slice(0, 12).map(e => ({
+      name: e.name,
+      type: e.isDirectory() ? "dir" : "file",
+    }));
+    return reply.send({ exists: true, path: dirPath, sample, totalEntries: entries.length });
+  } catch (err) {
+    return reply.send({
+      exists: true,
+      path: dirPath,
+      error: err instanceof Error ? err.message : String(err),
+      sample: [] as string[],
+    });
+  }
 });
 
 // ── PVFS unimported files ─────────────────────────────────────────────────

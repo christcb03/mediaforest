@@ -71,7 +71,10 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [limit, setLimit] = useState('5000')
   const [phase, setPhase] = useState<Phase>('idle')
   const [filesSeen, setFilesSeen] = useState(0)
+  const [dirsScanned, setDirsScanned] = useState(0)
   const [newFound, setNewFound] = useState(0)
+  const [scanPhase, setScanPhase] = useState<'indexing' | 'walking' | null>(null)
+  const [currentDir, setCurrentDir] = useState('')
   const [resumedCount, setResumedCount] = useState(0)
   const [scanFiles, setScanFiles] = useState<ScannedFile[]>([])
   const [newCount, setNewCount] = useState(0)
@@ -258,12 +261,22 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setImportResult(null)
     setPhase('scanning')
     setFilesSeen(0)
+    setDirsScanned(0)
     setNewFound(0)
+    setScanPhase(null)
+    setCurrentDir('')
     setResumedCount(0)
     matchedTitlesRef.current = new Set()
     pendingMatchRef.current = []
     matchInFlightRef.current = false
     try {
+      const diag = await api.pvfsScanDiagnose(dirPath)
+      if (!diag.exists) {
+        setError(`Folder not visible inside MediaForest: ${dirPath}. Use a path under /media (see Settings library default paths).`)
+        setPhase('idle')
+        return
+      }
+
       const maxNew = parseInt(limit, 10)
       const { jobId, resumed } = await api.pvfsScan({
         path: dirPath,
@@ -277,8 +290,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       const tick = async () => {
         try {
           const res = await api.pvfsScanJob(jobId)
-          setFilesSeen(res.files_seen ?? 0)
+          setScanPhase(res.phase ?? (res.status === 'running' ? 'walking' : null))
+          setFilesSeen(res.files_seen ?? res.found ?? 0)
+          setDirsScanned(res.dirs_scanned ?? 0)
           setNewFound(res.new_count ?? res.found ?? 0)
+          setCurrentDir(res.current_dir ?? '')
 
           if (res.files.length > lastFileCount) {
             const newFiles = res.files.slice(lastFileCount)
@@ -586,10 +602,15 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           </span>
         )}
         {phase === 'scanning' && (
-          <span className="text-xs text-gray-500 ml-2 animate-pulse">
-            Scanning… {filesSeen} examined · {newFound} new to import
+          <span className="text-xs text-gray-500 ml-2 animate-pulse max-w-xl">
+            {scanPhase === 'indexing'
+              ? 'Loading PhraseVault file index…'
+              : <>Scanning… {filesSeen} videos · {dirsScanned} folders · {newFound} new</>}
             {resumedCount > 0 && ` · resumed ${resumedCount}`}
             {matchingProgress.total > 0 && ` · matching ${matchingProgress.done}/${matchingProgress.total}`}
+            {currentDir && scanPhase === 'walking' && (
+              <span className="block font-mono text-[10px] text-gray-600 truncate mt-0.5">{currentDir}</span>
+            )}
           </span>
         )}
         {phase === 'ready' && matchingProgress.total > 0 && !matchingDone && (
@@ -752,7 +773,11 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         {phase === 'scanning' && scanFiles.length === 0 && (
           <div className="text-center text-gray-500 py-16 text-sm animate-pulse space-y-1">
             <p>Scanning {dirPath}…</p>
-            <p className="text-xs">{filesSeen} video files examined · {newFound} new to import</p>
+            <p className="text-xs">
+              {scanPhase === 'indexing'
+                ? 'Checking PhraseVault for already-imported paths…'
+                : `${filesSeen} videos · ${dirsScanned} folders scanned · ${newFound} new to import`}
+            </p>
           </div>
         )}
 
