@@ -30,6 +30,7 @@ export default function App() {
   const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [showInvite, setShowInvite] = useState(false)
   const [sections, setSections] = useState<SectionRecord[]>([])
+  const [sectionsLoading, setSectionsLoading] = useState(true)
   const [sectionResults, setSectionResults] = useState<Map<string, MediaResult[]>>(new Map())
 
   function handleLogin(resp: LoginResponse) {
@@ -70,9 +71,11 @@ export default function App() {
   // Load section config
   useEffect(() => {
     if (!token) return
+    setSectionsLoading(true)
     api.getSections()
       .then(r => setSections(r.sections))
       .catch(() => {})
+      .finally(() => setSectionsLoading(false))
   }, [token])
 
   // Full-text search (only when query is non-empty — collapses all sections)
@@ -117,7 +120,7 @@ export default function App() {
 
   if (!token) return <LoginPage onLogin={handleLogin} />
   if (showSettings) return (
-    <SettingsPage onClose={() => setShowSettings(false)} onUnauthorized={handleUnauthorized} userRole={currentUser?.role as 'owner' | 'member' | undefined} />
+    <SettingsPage onClose={() => { setShowSettings(false); loadSections() }} onUnauthorized={handleUnauthorized} userRole={currentUser?.role as 'owner' | 'member' | undefined} />
   )
   if (showScan) return (
     <ScanPage onClose={() => { setShowScan(false); loadSections() }} onUnauthorized={handleUnauthorized} />
@@ -240,7 +243,9 @@ export default function App() {
       ) : (
         /* Section view */
         <div className="py-6 space-y-8">
-          {sections.length === 0 ? (
+          {sectionsLoading ? (
+            <div className="text-center text-gray-600 py-16 px-6">Loading…</div>
+          ) : sections.length === 0 ? (
             <div className="text-center text-gray-600 py-16 px-6">
               No libraries yet. Use <strong>📂 Scan</strong> to import media, or go to Settings to create libraries.
             </div>
