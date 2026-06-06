@@ -920,7 +920,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                 <li className="text-gray-600">Waiting for server…</li>
               ) : scanLogs.map((line, i) => (
                 <li key={i}>
-                  <span className="text-gray-600">{new Date(line.t).toLocaleTimeString()}</span>
+                  <span className="text-gray-600">{new Date(line.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                   {' '}{line.msg}
                 </li>
               ))}
