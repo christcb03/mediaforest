@@ -1,7 +1,8 @@
 /** Tracks scan jobs for overall timeout and stall detection. */
 
 export const SCAN_MAX_DURATION_MS = 20 * 60 * 1000;
-export const SCAN_STALL_MS = 90 * 1000;
+/** NFS/metadata-heavy roots can block on readdir/stat far longer than 90s. */
+export const SCAN_STALL_MS = 5 * 60 * 1000;
 
 export interface ScanWatchdogJob {
   status: string;

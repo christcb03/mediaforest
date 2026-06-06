@@ -88,6 +88,30 @@ docker compose pull && docker compose up -d
 
 Ensure `docker-compose.yml` includes `init: true` under the `mediaforest` service (see `deploy/docker-compose.mediaforest.yml`).
 
+## After reboot (site down / Cloudflare 521)
+
+Saltbox runs `sb install core` on boot maintenance, which **stops Docker** while remounting rclone/NAS paths. If Docker is not brought back up afterward, Traefik and all apps stay down (Cloudflare **521**).
+
+**Check on presubuntu:**
+
+```bash
+systemctl is-active docker          # should be "active"
+docker ps --format 'table {{.Names}}\t{{.Status}}' | egrep 'traefik|mediaforest|phrasevault'
+curl -s https://mediaforest.turnernetworking.com/health
+```
+
+**Quick fix:**
+
+```bash
+sudo systemctl start docker.socket docker.service
+sb docker start                     # starts Saltbox-managed containers (Traefik, MF, PV, …)
+docker start watchtower-phrasevault # if exited
+```
+
+**Boot safety net:** `ensure-docker-stack.service` + timer (12 min after boot) on presubuntu re-starts Docker and runs `sb docker start` if Saltbox left Docker stopped. Script: `/usr/local/bin/ensure-docker-stack.sh`.
+
+Docker is `enabled` and containers use `restart: unless-stopped`, but they cannot restart while the Docker daemon itself is stopped.
+
 ## Manual Re-deploy
 
 ```bash

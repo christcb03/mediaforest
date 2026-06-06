@@ -1,4 +1,5 @@
 import { readdirSync, statSync, existsSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -180,12 +181,20 @@ export interface ScanWalkProgress {
   currentDir: string;
 }
 
+const READDIR_TIMEOUT_ROOT_MS = 3 * 60 * 1000
+const READDIR_TIMEOUT_MS = 90 * 1000
+
 export async function scanVideoFilesAsync(
   dir: string,
   extensions: Set<string> = DEFAULT_VIDEO_EXTENSIONS,
   onProgress?: (progress: ScanWalkProgress) => void,
   onFile?: (file: ScannedFile) => boolean | void,
-  opts?: { skipArtwork?: boolean; shouldAbort?: () => string | null | undefined },
+  opts?: {
+    skipArtwork?: boolean
+    shouldAbort?: () => string | null | undefined
+    /** Fires before each readdir attempt — use to touch stall watchdogs on slow NFS mounts. */
+    onEnterDir?: (dir: string, attempt: number) => void
+  },
 ): Promise<ScannedFile[]> {
   const results: ScannedFile[] = []
   const skipArtwork = opts?.skipArtwork !== false
@@ -202,14 +211,55 @@ export async function scanVideoFilesAsync(
     })
   }
 
-  async function walk(current: string, isRoot = false): Promise<boolean> {
-    let entries: string[]
+  function isReaddirTimeout(err: unknown): boolean {
+    return err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
+  }
+
+  async function readdirTimed(readPath: string, timeoutMs: number): Promise<Dirent[]> {
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      entries = await readdir(current)
+      return await Promise.race([
+        readdir(readPath, { withFileTypes: true }),
+        new Promise<Dirent[]>((_, reject) => {
+          timer = setTimeout(() => {
+            const err = new Error(`readdir timeout after ${timeoutMs}ms`)
+            err.name = 'TimeoutError'
+            reject(err)
+          }, timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  async function readDirWithRetry(readPath: string, isRoot: boolean): Promise<Dirent[]> {
+    const attempts = isRoot ? 5 : 2
+    const timeoutMs = isRoot ? READDIR_TIMEOUT_ROOT_MS : READDIR_TIMEOUT_MS
+    let lastErr: unknown
+    for (let i = 0; i < attempts; i++) {
+      opts?.onEnterDir?.(readPath, i + 1)
+      try {
+        return await readdirTimed(readPath, timeoutMs)
+      } catch (err) {
+        lastErr = err
+        if (i + 1 < attempts) await new Promise<void>(r => setTimeout(r, 500 * (i + 1)))
+      }
+    }
+    throw lastErr
+  }
+
+  async function walk(current: string, isRoot = false): Promise<boolean> {
+    let entries: Dirent[]
+    try {
+      entries = await readDirWithRetry(current, isRoot)
     } catch (err) {
       if (isRoot) {
+        const detail = err instanceof Error ? err.message : String(err)
         throw new Error(
-          `Cannot read directory ${current}: ${err instanceof Error ? err.message : String(err)}`,
+          isReaddirTimeout(err)
+            ? `Timed out listing ${current} after ${READDIR_TIMEOUT_ROOT_MS / 1000}s — NFS mount may be slow or hung`
+            : `Cannot read directory ${current}: ${detail}`,
         )
       }
       return false
@@ -217,29 +267,47 @@ export async function scanVideoFilesAsync(
     dirsScanned++
     emitProgress(current)
 
-    for (const entry of entries) {
+    for (const dirent of entries) {
       const abortMsg = opts?.shouldAbort?.()
       if (abortMsg) throw new Error(abortMsg)
 
       entriesScanned++
-      if (++ops % 48 === 0) await new Promise<void>(r => setImmediate(r))
-
-      const fullPath = path.join(current, entry)
-      let st
-      try {
-        st = await stat(fullPath)
-      } catch {
-        continue
+      if (++ops % 48 === 0) {
+        emitProgress(current)
+        await new Promise<void>(r => setImmediate(r))
       }
-      if (st.isDirectory()) {
+
+      const entry = dirent.name
+      const fullPath = path.join(current, entry)
+      let isDir = dirent.isDirectory()
+      let isFile = dirent.isFile()
+
+      // Some mounts omit d_type in readdir — fall back to stat only when needed.
+      if (!isDir && !isFile) {
+        try {
+          const st = await stat(fullPath)
+          isDir = st.isDirectory()
+          isFile = st.isFile()
+        } catch {
+          continue
+        }
+      }
+
+      if (isDir) {
         if (await walk(fullPath)) return true
-      } else if (st.isFile()) {
+      } else if (isFile) {
         const ext = path.extname(entry).toLowerCase()
         if (extensions.has(ext)) {
+          let sizeBytes = 0
+          try {
+            sizeBytes = (await stat(fullPath)).size
+          } catch {
+            continue
+          }
           const parsed = parseMediaPath(fullPath)
           const file: ScannedFile = {
             path: fullPath,
-            size_bytes: st.size,
+            size_bytes: sizeBytes,
             ext,
             parsed,
             local_artwork: skipArtwork ? null : findLocalArtwork(fullPath, parsed.title),

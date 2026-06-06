@@ -13,8 +13,12 @@ function sessionPath(dataDir: string): string {
   return `${dataDir}/scan_sessions.json`;
 }
 
-function normalizePath(p: string): string {
+export function normalizeScanPath(p: string): string {
   return p.replace(/\/+$/, '') || '/';
+}
+
+function normalizePath(p: string): string {
+  return normalizeScanPath(p);
 }
 
 function loadMap(dataDir: string): Record<string, ScanSession> {

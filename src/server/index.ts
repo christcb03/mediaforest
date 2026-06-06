@@ -36,7 +36,7 @@ import {
   upsertScanStagedBatch, updateStagedBatchItems,
 } from "../import/staging.js";
 import {
-  getScanSession, upsertScanSession, deleteScanSession, sessionPathSet,
+  getScanSession, upsertScanSession, deleteScanSession, sessionPathSet, normalizeScanPath,
 } from "../import/scan-session.js";
 import type { ScannedFile } from "../scan/scan.js";
 import {
@@ -1332,6 +1332,19 @@ interface ScanJob {
 }
 const scanJobs = new Map<string, ScanJob>();
 
+/** Resume only when a recent interrupted scan left partial files on disk. */
+const SCAN_SESSION_RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function findRunningScanJobForPath(scanPath: string): { jobId: string; job: ScanJob } | null {
+  const key = normalizeScanPath(scanPath);
+  for (const [jobId, job] of scanJobs) {
+    if (job.status === "running" && normalizeScanPath(job.scanPath) === key) {
+      return { jobId, job };
+    }
+  }
+  return null;
+}
+
 function serializeScanJobPoll(job: ScanJob, since: number) {
   const allFiles = job.files as ScannedFile[];
   return {
@@ -1395,10 +1408,19 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
     const scanUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
     const { path: dirPath, dry_run = true, extensions, limit, library } = req.body;
     if (!dirPath) return reply.status(400).send({ error: "path is required" });
-    if (!existsSync(dirPath)) return reply.status(400).send({ error: `directory not found: ${dirPath}` });
+
+    const running = findRunningScanJobForPath(dirPath);
+    if (running) {
+      return reply.status(202).send({
+        jobId: running.jobId,
+        resumed: running.job.resumed_from_session ?? running.job.files.length,
+      });
+    }
 
     const priorSession = getScanSession(DATA_DIR, dirPath);
-    const resume = priorSession?.status === "scanning";
+    const resume = priorSession?.status === "scanning"
+      && priorSession.files.length > 0
+      && Date.now() - priorSession.updatedAt < SCAN_SESSION_RESUME_MAX_AGE_MS;
     const initialFiles = resume ? [...priorSession.files] : [];
     if (!resume) {
       upsertScanSession(DATA_DIR, dirPath, { library, status: "scanning", files: [] });
@@ -1465,6 +1487,9 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
         if (dry_run) {
           let newCount = initialFiles.length;
           job.phase = "walking";
+          watchdog.touch();
+          job.current_dir = dirPath;
+          appendScanJobLog(job, `reading ${dirPath}`);
           await scanVideoFilesAsync(dirPath, extSet, (p) => {
             watchdog.touch();
             job.files_seen = p.videoFilesSeen;
@@ -1504,6 +1529,13 @@ app.post<{ Body: { path: string; dry_run?: boolean; extensions?: string[]; limit
           }, {
             skipArtwork: true,
             shouldAbort: () => (watchdog.isAborted() ? job.error ?? "scan aborted" : null),
+            onEnterDir: (readDir, attempt) => {
+              watchdog.touch();
+              job.current_dir = readDir;
+              const msg = attempt > 1 ? `retry reading ${readDir} (${attempt})` : `reading ${readDir}`;
+              appendScanJobLog(job, msg);
+              scanLog.info({ dir: readDir, attempt }, "scan reading directory");
+            },
           });
           if (!watchdog.isAborted()) {
             job.status = "done";
