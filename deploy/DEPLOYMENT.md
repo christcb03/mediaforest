@@ -59,6 +59,7 @@ git push origin main  (per repo)
 - **PhraseVault GHCR** — if Watchtower cannot pull (private package), manual: `cd /home/chris/phrasevault && docker compose pull && docker compose up -d`. See also [phrasevault docs/DEPLOY.md](https://github.com/christcb03/phrasevault/blob/main/docs/DEPLOY.md).
 - Watchtower (`watchtower-phrasevault` container) only monitors containers with `com.centurylinklabs.watchtower.enable=true` label.
 - Media library is mounted read-only from `/mnt/unionfs/Media` into both containers as `/media`.
+  - For the admin local delete feature (`/admin/local-storage/delete` in Forest page), you must change the volume to read-write (remove `:ro`) and ensure the container's node user (UID 1000) has write permission on the host mount. Use with caution — there is no trash or undo, and it only affects local mounts (remote storage deletes are not supported).
 
 ## Factory reset (owner)
 

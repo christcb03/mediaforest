@@ -51,24 +51,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Notify Telegram on success
-        if: success() && env.TELEGRAM_BOT_TOKEN != ''
+      - name: Notify Telegram (build result)
+        if: always() && env.TELEGRAM_BOT_TOKEN != ''
         env:
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ ${{ github.repository }} image pushed to GHCR
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="✅"
+            TEXT="$EMOJI ${{ github.repository }} image pushed to GHCR
           Commit: ${{ github.sha }} by ${{ github.actor }}
           Watchtower will deploy within 5 minutes."
-
-      - name: Notify Telegram on failure
-        if: failure() && env.TELEGRAM_BOT_TOKEN != ''
-        env:
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
+          else
+            EMOJI="❌"
+            TEXT="$EMOJI ${{ github.repository }} build $STATUS
+          Commit: ${{ github.sha }} by ${{ github.actor }}
+          Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=❌ ${{ github.repository }} build FAILED
-          Commit: ${{ github.sha }} by ${{ github.actor }}
-          Check: https://github.com/${{ github.repository }}/actions"
+            --data-urlencode "text=$TEXT"

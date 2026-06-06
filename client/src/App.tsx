@@ -9,6 +9,7 @@ import SettingsPage from './SettingsPage'
 import ScanPage from './ScanPage'
 import PlexSyncPage from './PlexSyncPage'
 import ForestPage from './ForestPage'
+import MediaEditorPage from './MediaEditorPage'
 
 const USER_KEY = 'pv_user'
 
@@ -29,6 +30,8 @@ export default function App() {
   const [showScan, setShowScan] = useState(false)
   const [showPlex, setShowPlex] = useState(false)
   const [showForest, setShowForest] = useState(false)
+  const [showMediaEditor, setShowMediaEditor] = useState(false)
+  const [mediaEditorInitialId, setMediaEditorInitialId] = useState<string | null>(null)
   const [inviteToken, setInviteToken] = useState<string | null>(null)
   const [showInvite, setShowInvite] = useState(false)
   const [sections, setSections] = useState<SectionRecord[]>([])
@@ -159,6 +162,13 @@ export default function App() {
   )
   if (showForest) return (
     <ForestPage onClose={() => setShowForest(false)} onUnauthorized={handleUnauthorized} />
+  )
+  if (showMediaEditor) return (
+    <MediaEditorPage
+      onClose={() => { setShowMediaEditor(false); setMediaEditorInitialId(null); loadSections() }}
+      onUnauthorized={handleUnauthorized}
+      initialMediaId={mediaEditorInitialId || undefined}
+    />
   )
 
   async function handleFollow(e: React.FormEvent) {
@@ -319,6 +329,7 @@ export default function App() {
           onClose={() => setSelected(null)}
           onUnauthorized={handleUnauthorized}
           onWatchlistChange={loadSections}
+          onRequestEdit={(r) => { setSelected(null); setMediaEditorInitialId(r.id); setShowMediaEditor(true); }}
         />
       )}
       {showAddMedia && (
@@ -464,12 +475,13 @@ function PosterCard({ result, onSelect }: { result: MediaResult; onSelect: (r: M
 }
 
 function DetailPanel({
-  result, onClose, onUnauthorized, onWatchlistChange,
+  result, onClose, onUnauthorized, onWatchlistChange, onRequestEdit,
 }: {
   result: MediaResult
   onClose: () => void
   onUnauthorized: () => void
   onWatchlistChange: () => void
+  onRequestEdit?: (r: MediaResult) => void
 }) {
   const [updatingStatus, setUpdatingStatus] = useState(false)
 
@@ -484,6 +496,24 @@ function DetailPanel({
     } finally {
       setUpdatingStatus(false)
     }
+  }
+
+  async function handleRemove() {
+    if (!confirm(`Remove "${result.title}" from your library? You can search for it later to restore by changing its status.`)) return
+    setUpdatingStatus(true)
+    try {
+      await api.updateWatchlist(result.id, 'removed')
+      onWatchlistChange()
+      onClose()
+    } catch (e) {
+      if (e instanceof UnauthorizedError) onUnauthorized()
+    } finally {
+      setUpdatingStatus(false)
+    }
+  }
+
+  function handleEdit() {
+    if (onRequestEdit) onRequestEdit(result)
   }
 
   const statuses: { value: WatchStatus; label: string }[] = [
@@ -532,6 +562,24 @@ function DetailPanel({
               )
             })}
           </div>
+        </div>
+
+        <div className="mb-4 flex gap-2">
+          <button
+            onClick={handleEdit}
+            className="text-xs bg-gray-700 hover:bg-gray-600 rounded px-3 py-1.5"
+            title="Edit title metadata (per-user; only affects your view and attachments)"
+          >
+            ✏️ Edit
+          </button>
+          <button
+            onClick={handleRemove}
+            disabled={updatingStatus}
+            className="text-xs bg-red-900/70 hover:bg-red-900 text-red-300 rounded px-3 py-1.5"
+            title="Remove this title from your personal library (hides it from sections; sets removed status)"
+          >
+            🗑 Remove
+          </button>
         </div>
 
         <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
@@ -586,6 +634,7 @@ function WatchBadge({ status }: { status: string }) {
     watching: 'bg-green-900 text-green-300',
     watched: 'bg-gray-700 text-gray-400',
     skipped: 'bg-gray-800 text-gray-600',
+    removed: 'bg-red-900 text-red-300',
   }
   return <span className={`text-xs rounded px-1.5 py-0.5 ${styles[status] ?? ''}`}>{status}</span>
 }

@@ -62,7 +62,7 @@ export interface CrosslinkPayload extends Record<string, unknown> {
 // A user's "I want to watch this" record.
 // size_bytes is recorded at add-time for watchlist capacity accounting.
 
-export type WatchStatus = "unwatched" | "watching" | "watched" | "skipped";
+export type WatchStatus = "unwatched" | "watching" | "watched" | "skipped" | "removed";
 
 export interface WatchlistEntryPayload extends Record<string, unknown> {
   media_node_id: string;

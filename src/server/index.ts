@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { createReadStream } from "fs";
+import * as fsp from 'fs/promises';
 import { Readable } from "node:stream";
 import { extname } from "node:path";
 import { randomBytes } from "crypto";
@@ -577,6 +578,28 @@ app.get<{
   });
   if (library) results = results.filter(r => r.media.payload.library === library);
   if (genre) results = results.filter(r => (r.media.payload.genres as string[] | undefined)?.some(g => g.toLowerCase() === genre.toLowerCase()));
+
+  // Per-user attachment filter: only titles the user has cross-linked (source_author matches).
+  // If the user has no crosslinks recorded yet, fall back to full results so legacy imports
+  // (pre-dating crosslink creation on import) continue to appear. Once crosslinks exist for
+  // the user, the view becomes their personal library (supporting per-user title edits).
+  if (currentUser?.pubKey) {
+    const myMedia = new Set<string>();
+    const anyClaimed = new Set<string>();
+    for await (const node of ownStore.list()) {
+      if (node.type !== 'crosslink') continue;
+      const p = node.payload as any;
+      if (p.media_node_id) anyClaimed.add(p.media_node_id);
+      if (p.source_author === currentUser.pubKey && p.media_node_id) {
+        myMedia.add(p.media_node_id);
+      }
+    }
+    if (myMedia.size > 0) {
+      results = results.filter(r => myMedia.has(r.media.id) || !anyClaimed.has(r.media.id));
+    }
+    // else: no crosslinks for this user → legacy global view (keeps pre-existing library visible)
+  }
+
   return { count: results.length, results: results.map(serializeResult) };
 });
 
@@ -1196,6 +1219,14 @@ app.post<{
             available: true,
           });
           await ownStore.append(storageNode);
+          // Record this user's personal attachment for per-user views/edits
+          const clNode = await createCrosslinkNode(privKeyHex, {
+            target_node_id: storageNode.id,
+            source_author: currentUser.pubKey,
+            media_node_id: mediaNodeId,
+            added_at: Date.now(),
+          });
+          await ownStore.append(clNode);
         }
       }
 
@@ -1898,6 +1929,163 @@ app.get<{
     limit,
     nodes: all.slice(offset, offset + limit),
   };
+});
+
+// ── Admin: replace/update a media title's metadata (creates new node + migrates sources/watchlists) ──
+app.post<{ Body: { old_media_id: string; payload: MediaPayload } }>("/admin/media/replace", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+
+  const { old_media_id, payload } = req.body;
+  if (!old_media_id || !payload || !payload.title) {
+    return reply.status(400).send({ error: "old_media_id and payload with title required" });
+  }
+
+  // 1. Create the updated media node (new id because content-addressed)
+  const newMedia = await createMediaNode(privKeyHex, payload);
+  await ownStore.append(newMedia);
+
+  // 2. Per-user migration: only migrate the *current user's* crosslinks, their linked storage_pointers, and their watchlist_entries.
+  // This keeps each user's view of the title separate.
+  const storageMap = new Map<string, string>(); // old storage id -> new storage id
+  const crosslinkMap = new Map<string, string>(); // old cl id -> new cl id
+
+  let migratedStorages = 0;
+  let migratedCrosslinks = 0;
+  let migratedWatchlists = 0;
+
+  // First, identify the user's crosslinks for this media (these define "my" attachments)
+  const myCrosslinkTargets = new Set<string>(); // storage ids the user has crosslinked for this media
+  for await (const node of ownStore.list()) {
+    if (node.type !== "crosslink") continue;
+    const p = node.payload as any;
+    if (p.media_node_id === old_media_id && p.source_author === currentUser.pubKey) {
+      myCrosslinkTargets.add(p.target_node_id);
+    }
+  }
+
+  // Migrate the user's storage pointers (only those linked by the user's crosslinks for this media).
+  // On first edit/claim for a legacy title (no prior crosslinks for this user on the media), claim
+  // the storages so the edited version becomes the user's personal copy.
+  for await (const node of ownStore.list()) {
+    if (node.type !== "storage_pointer") continue;
+    const p = node.payload as any;
+    if (p.media_node_id !== old_media_id) continue;
+    if (myCrosslinkTargets.size > 0 && !myCrosslinkTargets.has(node.id)) continue; // only user's (or all if first claim)
+
+    const newSPPayload: StoragePointerPayload = {
+      ...p,
+      media_node_id: newMedia.id,
+    };
+    const newSP = await createStoragePointerNode(privKeyHex, newSPPayload);
+    await ownStore.append(newSP);
+    storageMap.set(node.id, newSP.id);
+    migratedStorages++;
+  }
+
+  // Migrate the user's crosslinks (re-point to new storage + new media)
+  for await (const node of ownStore.list()) {
+    if (node.type !== "crosslink") continue;
+    const p = node.payload as any;
+    if (p.media_node_id !== old_media_id || p.source_author !== currentUser.pubKey) continue;
+
+    const newTarget = storageMap.get(p.target_node_id) || p.target_node_id;
+    const newCLPayload: CrosslinkPayload = {
+      ...p,
+      target_node_id: newTarget,
+      media_node_id: newMedia.id,
+      added_at: p.added_at ?? Date.now(),
+    };
+    const newCL = await createCrosslinkNode(privKeyHex, newCLPayload);
+    await ownStore.append(newCL);
+    crosslinkMap.set(node.id, newCL.id);
+    migratedCrosslinks++;
+  }
+
+  // If this was the first time the user claimed/attached this media (no prior crosslink for them),
+  // create the crosslink(s) now for the storage(s) we just claimed under the new media node.
+  // This ensures the title enters their per-user view and future edits migrate cleanly.
+  if (migratedStorages > 0 && migratedCrosslinks === 0) {
+    for (const [, newStorageId] of storageMap) {
+      const newCLPayload: CrosslinkPayload = {
+        target_node_id: newStorageId,
+        source_author: currentUser.pubKey,
+        media_node_id: newMedia.id,
+        added_at: Date.now(),
+      };
+      const newCL = await createCrosslinkNode(privKeyHex, newCLPayload);
+      await ownStore.append(newCL);
+      migratedCrosslinks++;
+    }
+  }
+
+  // Migrate the user's watchlist entries
+  for await (const node of ownStore.list()) {
+    if (node.type !== "watchlist_entry") continue;
+    const p = node.payload as any;
+    if (p.media_node_id !== old_media_id || p.user_pub_key !== currentUser.pubKey) continue;
+
+    const newCLid = crosslinkMap.get(p.crosslink_node_id) || p.crosslink_node_id;
+    const newWLPayload: WatchlistEntryPayload = {
+      ...p,
+      media_node_id: newMedia.id,
+      crosslink_node_id: newCLid,
+      added_at: p.added_at ?? Date.now(),
+    };
+    const newWL = await createWatchlistEntryNode(privKeyHex, newWLPayload);
+    await ownStore.append(newWL);
+    migratedWatchlists++;
+  }
+
+  await engine.refresh();
+
+  return {
+    old_media_id,
+    new_media_id: newMedia.id,
+    migrated_storages: migratedStorages,
+    migrated_crosslinks: migratedCrosslinks,
+    migrated_watchlists: migratedWatchlists,
+  };
+});
+
+// ── Admin: delete files/folders from locally mounted media (owner only; local FS only) ──
+// Remote/PVFS storage deletes are explicitly not supported.
+app.post<{ Body: { path: string } }>("/admin/local-storage/delete", async (req, reply) => {
+  const currentUser = (req as FastifyRequest & { currentUser: UserRecord }).currentUser;
+  if (currentUser.role !== "owner") return reply.status(403).send({ error: "owner only" });
+
+  const relPath = (req.body.path || "").trim();
+  if (!relPath) return reply.status(400).send({ error: "path is required" });
+
+  if (!MEDIA_DIR) {
+    return reply.status(400).send({ error: "MF_MEDIA_DIR not configured; local deletes not available" });
+  }
+
+  const root = path.resolve(MEDIA_DIR);
+  // Normalize and prevent path traversal
+  const target = path.resolve(root, relPath.replace(/^\/+/, ""));
+  if (!target.startsWith(root + path.sep) && target !== root) {
+    return reply.status(403).send({ error: "path is outside the configured media directory" });
+  }
+  if (target === root) {
+    return reply.status(403).send({ error: "refusing to delete the entire media root" });
+  }
+
+  try {
+    const st = await fsp.stat(target);
+    const isDir = st.isDirectory();
+
+    await fsp.rm(target, { recursive: isDir, force: true });
+
+    return { deleted: target.replace(root, ""), wasDirectory: isDir };
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return reply.status(404).send({ error: "path not found" });
+    }
+    if (err.code === "EACCES" || err.code === "EROFS") {
+      return reply.status(403).send({ error: "permission denied (mount may be read-only; see docs for enabling deletes on local media)" });
+    }
+    return reply.status(500).send({ error: "delete failed: " + (err.message || err) });
+  }
 });
 
 // ── Static files + SPA fallback ────────────────────────────────────────────

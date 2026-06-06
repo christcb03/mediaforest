@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RelayQueryEngine } from '../relay/query.js';
 import type { HypercoreStore } from '../store/hypercore.js';
-import { createMediaNode, createStoragePointerNode } from '../relay/index.js';
+import { createMediaNode, createStoragePointerNode, createCrosslinkNode } from '../relay/index.js';
 import type { ImportItemBody } from './types.js';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
@@ -114,6 +114,14 @@ export async function runBatchImport(
             available: true,
           });
           await deps.ownStore.append(storageNode);
+          // Record this user's personal attachment (enables per-user library view + per-user title edits)
+          const clNode = await createCrosslinkNode(deps.privKeyHex, {
+            target_node_id: storageNode.id,
+            source_author: importUserPubKey,
+            media_node_id: mediaNodeId,
+            added_at: Date.now(),
+          });
+          await deps.ownStore.append(clNode);
           fileCount++;
         } catch { /* per-file */ }
       }

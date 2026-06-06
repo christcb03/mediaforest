@@ -29,6 +29,12 @@ export default function ForestPage({ onClose, onUnauthorized }: Props) {
   const [offset, setOffset] = useState(0)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
+  // Local FS delete state (owner only)
+  const [deletePath, setDeletePath] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [deleteResult, setDeleteResult] = useState<{ deleted: string; wasDirectory: boolean } | null>(null)
+  const [deleteError, setDeleteError] = useState('')
+
   useEffect(() => {
     api.adminStats()
       .then(setStats)
@@ -80,6 +86,25 @@ export default function ForestPage({ onClose, onUnauthorized }: Props) {
     setOffset(0)
   }
 
+  async function handleLocalDelete() {
+    if (!deletePath.trim()) return
+    if (!window.confirm(`Permanently DELETE ${deletePath} from local disk?\nThis cannot be undone and does not affect nodes or remote storage.`)) return
+
+    setDeleting(true)
+    setDeleteError('')
+    setDeleteResult(null)
+    try {
+      const res = await api.deleteLocalStorage(deletePath.trim())
+      setDeleteResult(res)
+      setDeletePath('')
+    } catch (err) {
+      if (err instanceof UnauthorizedError) onUnauthorized()
+      else setDeleteError(err instanceof Error ? err.message : 'Delete failed')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans">
       <header className="border-b border-gray-800 px-6 py-4 flex items-center gap-4">
@@ -120,6 +145,36 @@ export default function ForestPage({ onClose, onUnauthorized }: Props) {
           )}
         </div>
       )}
+
+      {/* Local FS delete tool (owner only; only for locally mounted media) */}
+      <div className="px-6 py-4 border-b border-gray-800 bg-gray-900/30">
+        <h2 className="text-sm font-semibold text-red-400 mb-1">Local Media Filesystem Delete</h2>
+        <p className="text-xs text-gray-500 mb-2">
+          Permanently delete files/folders from the locally mounted media volume only.
+          <strong> Does not work for remote storage</strong> (not implemented). 
+          Current default mount is read-only — change to rw in compose if you need this.
+          This deletes from disk only; corresponding nodes remain until cleaned (re-scan or Forest).
+        </p>
+        <div className="flex gap-2 items-center">
+          <input
+            value={deletePath}
+            onChange={e => setDeletePath(e.target.value)}
+            placeholder="path relative to /media (e.g. Movies/Bad.mkv or TV/ShowToRemove)"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:border-red-500"
+            disabled={deleting}
+          />
+          <button
+            onClick={handleLocalDelete}
+            disabled={deleting || !deletePath.trim()}
+            className="px-4 py-1.5 text-sm bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white rounded font-medium"
+          >
+            {deleting ? "Deleting…" : "Delete permanently"}
+          </button>
+        </div>
+        {deleteResult && <div className="mt-1 text-xs text-green-400">Deleted {deleteResult.deleted} {deleteResult.wasDirectory ? "(dir)" : ""}</div>}
+        {deleteError && <div className="mt-1 text-xs text-red-400">{deleteError}</div>}
+        <div className="mt-1 text-[10px] text-gray-600">Type a path and confirm in the dialog. Use with extreme caution.</div>
+      </div>
 
       <div className="px-6 py-3 border-b border-gray-800 flex flex-wrap gap-3 items-center">
         <div className="flex gap-1 flex-wrap">

@@ -185,7 +185,7 @@ export interface TmdbDetails extends TmdbSearchResult {
   runtime_min?: number;
 }
 
-export type WatchStatus = 'unwatched' | 'watching' | 'watched' | 'skipped';
+export type WatchStatus = 'unwatched' | 'watching' | 'watched' | 'skipped' | 'removed';
 
 export interface ProviderConfig {
   node_id: string;
@@ -481,6 +481,12 @@ export const api = {
   factoryResetPreview: () => get<FactoryResetPreview>('/admin/factory-reset/preview'),
   factoryReset: (body: FactoryResetRequest) =>
     post<{ ok: boolean; summary: Record<string, unknown> }>('/admin/factory-reset', body),
+  // Media metadata replace (owner) - creates new media node + migrates associated sources/watchlists
+  replaceMedia: (body: { old_media_id: string; payload: any }) =>
+    post<{ old_media_id: string; new_media_id: string; migrated_storages: number; migrated_crosslinks: number; migrated_watchlists: number }>('/admin/media/replace', body),
+  // Admin local FS delete (only for locally mounted media; remote not supported)
+  deleteLocalStorage: (path: string) =>
+    post<{ deleted: string; wasDirectory: boolean }>('/admin/local-storage/delete', { path }),
 };
 
 export const FACTORY_RESET_PHRASE = 'DELETE ALL MEDIA DATA';
