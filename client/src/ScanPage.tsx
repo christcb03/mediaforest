@@ -646,7 +646,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setImportElapsed(0)
     setPhase('importing')
     try {
-      const result = await api.importBatch({ items: buildImportItems() })
+      await api.importBatch({ items: buildImportItems() })
       // Success — return to main library view so the new titles appear immediately
       // (parent will refresh sections + health count).
       onClose()
@@ -681,7 +681,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setImportElapsed(0)
     setPhase('importing')
     try {
-      const result = await api.commitStagedImport(id)
+      await api.commitStagedImport(id)
       // Success path — auto return to main (refresh will pick up the newly committed items)
       onClose()
       // loadStaged is local; parent refresh on close will handle overall state
