@@ -91,6 +91,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [stagedBatches, setStagedBatches] = useState<StagedBatchSummary[]>([])
   const [stageMsg, setStageMsg] = useState('')
   const [importingCount, setImportingCount] = useState(0)
+  const [importStart, setImportStart] = useState<number | null>(null)
+  const [importElapsed, setImportElapsed] = useState(0)
 
   // Library selection
   const [libraries, setLibraries] = useState<LibraryRecord[]>([])
@@ -210,6 +212,18 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
+  // Live elapsed timer while importing so user can see how long they've been waiting
+  useEffect(() => {
+    if (phase !== 'importing' || !importStart) {
+      setImportElapsed(0)
+      return
+    }
+    const id = setInterval(() => {
+      setImportElapsed(Math.floor((Date.now() - importStart) / 1000))
+    }, 1000)
+    return () => clearInterval(id)
+  }, [phase, importStart])
+
   // ── Scan ──────────────────────────────────────────────────────────────────
 
   // Fire a batch match request for queued titles. Serialized so only one is
@@ -327,6 +341,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setMatchError('')
     setImportResult(null)
     setImportingCount(0)
+    setImportStart(null)
     setCurrentPage(1)
     setPhase('scanning')
     setFilesSeen(0)
@@ -626,6 +641,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       if (!window.confirm(`${unconfirmedNeedsReview} item(s) have low-confidence matches and haven't been confirmed. Import anyway?`)) return
     }
     setImportingCount(selectedCount)
+    const start = Date.now()
+    setImportStart(start)
+    setImportElapsed(0)
     setPhase('importing')
     try {
       const result = await api.importBatch({ items: buildImportItems() })
@@ -637,6 +655,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       setError(e instanceof Error ? e.message : 'Import failed')
       setPhase('ready')
       setImportingCount(0)
+      setImportStart(null)
     }
   }
 
@@ -657,6 +676,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
 
   async function handleCommitStaged(id: string) {
     setImportingCount(0)
+    const start = Date.now()
+    setImportStart(start)
+    setImportElapsed(0)
     setPhase('importing')
     try {
       const result = await api.commitStagedImport(id)
@@ -667,6 +689,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError(e instanceof Error ? e.message : 'Commit failed')
       setPhase('ready')
+      setImportStart(null)
     }
   }
 
@@ -948,7 +971,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                 )}
               </div>
             </div>
-            <button onClick={() => { setPhase('idle'); setScanFiles([]); setCurrentPage(1); setImportingCount(0) }} className="text-sm text-indigo-400 hover:text-indigo-300">
+            <button onClick={() => { setPhase('idle'); setScanFiles([]); setCurrentPage(1); setImportingCount(0); setImportStart(null) }} className="text-sm text-indigo-400 hover:text-indigo-300">
               ← Scan another directory
             </button>
           </div>
@@ -961,7 +984,12 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             <div className="text-lg font-medium text-white">
               Importing{importingCount > 0 ? ` ${importingCount} item${importingCount === 1 ? '' : 's'}` : ''}…
             </div>
-            <div className="text-sm text-gray-500 mt-1">Updating your library. This may take a moment for larger batches.</div>
+            {importStart && (
+              <div className="text-xs text-gray-400 mt-1 font-mono">
+                started {new Date(importStart).toLocaleTimeString()} · elapsed {importElapsed}s
+              </div>
+            )}
+            <div className="text-sm text-gray-500 mt-2">Updating your library. This may take a moment for larger batches.</div>
           </div>
         )}
 
