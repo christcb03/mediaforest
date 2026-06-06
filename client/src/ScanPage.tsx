@@ -90,11 +90,17 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   const [importResult, setImportResult] = useState<{ imported: number; failed: number } | null>(null)
   const [stagedBatches, setStagedBatches] = useState<StagedBatchSummary[]>([])
   const [stageMsg, setStageMsg] = useState('')
+  const [importingCount, setImportingCount] = useState(0)
 
   // Library selection
   const [libraries, setLibraries] = useState<LibraryRecord[]>([])
   const [selectedLibrary, setSelectedLibrary] = useState<string>('')
   const [showUncertainOnly, setShowUncertainOnly] = useState(false)
+
+  // Pagination for long import lists (e.g. 5000+ item libraries)
+  const [pageSize, setPageSize] = useState(100) // 0 = show all / no pagination
+  const [currentPage, setCurrentPage] = useState(1)
+  const [showScrollTop, setShowScrollTop] = useState(false)
 
   // Show/movie selection: key = title, value = selected season numbers (null = all, empty Set = none)
   const [selectedShows, setSelectedShows] = useState<Map<string, Set<number> | null>>(new Map())
@@ -114,6 +120,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   useEffect(() => { loadStaged() }, [loadStaged])
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const scanRunRef = useRef(0)
   const matchedTitlesRef = useRef(new Set<string>())   // keys already submitted for matching
   const matchInFlightRef = useRef(false)                // one match request at a time
   const pendingMatchRef = useRef<Array<{
@@ -160,16 +167,48 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     })
   }, [movies, matchStates, showUncertainOnly])
 
+  // Derived pagination (slices of the already-filtered visible lists)
+  const pagedShows = pageSize > 0
+    ? visibleShows.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+    : visibleShows
+  const pagedMovies = pageSize > 0
+    ? visibleMovies.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+    : visibleMovies
+  const totalPages = pageSize > 0
+    ? Math.max(1, Math.ceil(Math.max(visibleShows.length, visibleMovies.length) / pageSize))
+    : 1
+  const needsPagination = pageSize > 0 && Math.max(visibleShows.length, visibleMovies.length) > pageSize
+
   useEffect(() => {
     api.getLibraries()
       .then(r => {
         setLibraries(r.libraries)
-        if (r.libraries.length > 0 && !selectedLibrary) setSelectedLibrary(r.libraries[0].id)
+        if (r.libraries.length > 0 && !selectedLibrary) {
+          const first = r.libraries[0]
+          setSelectedLibrary(first.id)
+          if (first.defaultPath) setDirPath(first.defaultPath)
+        }
       })
       .catch(() => {})
   }, [])
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+
+  // Clamp current page if the list shrinks (filter, pageSize change, etc.)
+  useEffect(() => {
+    setCurrentPage(p => {
+      if (pageSize <= 0) return 1
+      const max = Math.max(1, Math.ceil(Math.max(visibleShows.length, visibleMovies.length) / pageSize))
+      return p > max ? max : p
+    })
+  }, [pageSize, visibleShows.length, visibleMovies.length])
+
+  // Floating back-to-top affordance for very long import lists
+  useEffect(() => {
+    const onScroll = () => setShowScrollTop(window.scrollY > 500)
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   // ── Scan ──────────────────────────────────────────────────────────────────
 
@@ -268,6 +307,9 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   }
 
   async function handleScan() {
+    if (phase === 'scanning' || phase === 'importing') return
+
+    const runId = ++scanRunRef.current
     if (pollRef.current) {
       clearInterval(pollRef.current)
       pollRef.current = null
@@ -284,6 +326,8 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     setMatchingProgress({ done: 0, total: 0 })
     setMatchError('')
     setImportResult(null)
+    setImportingCount(0)
+    setCurrentPage(1)
     setPhase('scanning')
     setFilesSeen(0)
     setDirsScanned(0)
@@ -296,6 +340,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     matchInFlightRef.current = false
     try {
       void api.pvfsScanDiagnose(dirPath).then(diag => {
+        if (runId !== scanRunRef.current) return
         if (!diag.exists) {
           setScanNotice(`Warning: ${dirPath} not found inside the container — scan may fail. Use /media/…`)
         }
@@ -308,13 +353,17 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
         limit: Number.isFinite(maxNew) && maxNew > 0 ? maxNew : undefined,
         library: selectedLibrary || undefined,
       })
+      if (runId !== scanRunRef.current) return
+
       setScanJobId(jobId)
       if (resumed && resumed > 0) setResumedCount(resumed)
 
       let filesTotal = 0
-      const tick = async () => {
+      const tick = async (): Promise<boolean> => {
+        if (runId !== scanRunRef.current) return false
         try {
           const res = await api.pvfsScanJob(jobId, filesTotal)
+          if (runId !== scanRunRef.current) return false
           pollFailRef.current = 0
           setScanPhase(res.phase ?? (res.status === 'running' ? 'walking' : null))
           setFilesSeen(res.files_seen ?? res.found ?? 0)
@@ -347,13 +396,16 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
               setPhase('ready')
               loadStaged()
             }
+            return false
           }
+          return true
         } catch (e) {
+          if (runId !== scanRunRef.current) return false
           pollFailRef.current += 1
           if (e instanceof UnauthorizedError) {
             if (pollRef.current) clearInterval(pollRef.current)
             onUnauthorized()
-            return
+            return false
           }
           const msg = e instanceof Error ? e.message : 'Poll failed'
           console.warn('[scan] poll error', pollFailRef.current, msg)
@@ -362,12 +414,17 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             pollRef.current = null
             setError(msg)
             setPhase('idle')
+            return false
           }
+          return true
         }
       }
-      await tick()
-      pollRef.current = setInterval(tick, 1000)
+      const keepPolling = await tick()
+      if (keepPolling && runId === scanRunRef.current) {
+        pollRef.current = setInterval(() => { void tick() }, 1000)
+      }
     } catch (e) {
+      if (runId !== scanRunRef.current) return
       setPhase('idle')
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError(e instanceof Error ? e.message : 'Scan failed')
@@ -568,15 +625,18 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
     if (unconfirmedNeedsReview > 0) {
       if (!window.confirm(`${unconfirmedNeedsReview} item(s) have low-confidence matches and haven't been confirmed. Import anyway?`)) return
     }
+    setImportingCount(selectedCount)
     setPhase('importing')
     try {
       const result = await api.importBatch({ items: buildImportItems() })
-      setImportResult({ imported: result.imported, failed: result.failed })
-      setPhase('done')
+      // Success — return to main library view so the new titles appear immediately
+      // (parent will refresh sections + health count).
+      onClose()
     } catch (e) {
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError(e instanceof Error ? e.message : 'Import failed')
       setPhase('ready')
+      setImportingCount(0)
     }
   }
 
@@ -596,12 +656,13 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
   }
 
   async function handleCommitStaged(id: string) {
+    setImportingCount(0)
     setPhase('importing')
     try {
       const result = await api.commitStagedImport(id)
-      setImportResult({ imported: result.imported, failed: result.failed })
-      setPhase('done')
-      loadStaged()
+      // Success path — auto return to main (refresh will pick up the newly committed items)
+      onClose()
+      // loadStaged is local; parent refresh on close will handle overall state
     } catch (e) {
       if (e instanceof UnauthorizedError) { onUnauthorized(); return }
       setError(e instanceof Error ? e.message : 'Commit failed')
@@ -636,6 +697,13 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
       <header className="border-b border-gray-800 px-6 py-4 flex items-center gap-4">
         <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm">← Back</button>
         <h1 className="text-base font-semibold text-white">Library Import</h1>
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="text-xs text-gray-400 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800"
+          title="Scroll back to top of the import list"
+        >
+          ↑ Top
+        </button>
         {stagedBatches.length > 0 && (
           <span className="text-xs bg-amber-900/60 text-amber-200 border border-amber-700 rounded-full px-2 py-0.5">
             {stagedBatches.length} staged
@@ -691,6 +759,24 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
               className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
             />
           </label>
+          <label className="flex flex-col gap-1 w-24 shrink-0">
+            <span className="text-xs text-gray-400">Per page</span>
+            <select
+              value={pageSize === 0 ? 'all' : String(pageSize)}
+              onChange={e => {
+                const val = e.target.value === 'all' ? 0 : parseInt(e.target.value, 10)
+                setPageSize(val)
+                setCurrentPage(1)
+              }}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-center disabled:opacity-50"
+            >
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+              <option value="all">All</option>
+            </select>
+          </label>
           {libraries.length > 0 && (
             <label className="flex flex-col gap-1 min-w-[140px]">
               <span className="text-xs text-gray-400">Add imports to library</span>
@@ -713,6 +799,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             </label>
           )}
           <button
+            type="button"
             onClick={handleScan}
             disabled={phase === 'scanning' || phase === 'importing'}
             className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm text-white rounded-lg px-5 py-2.5 font-medium"
@@ -721,7 +808,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           </button>
           {(phase === 'ready' || (phase === 'scanning' && scanFiles.length > 0)) && (
             <button
-              onClick={() => setShowUncertainOnly(v => !v)}
+              onClick={() => { setShowUncertainOnly(v => !v); setCurrentPage(1) }}
               className={`text-sm rounded-lg px-4 py-2.5 font-medium transition-colors ${
                 showUncertainOnly
                   ? 'bg-yellow-700 hover:bg-yellow-600 text-yellow-100'
@@ -861,17 +948,56 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                 )}
               </div>
             </div>
-            <button onClick={() => { setPhase('idle'); setScanFiles([]) }} className="text-sm text-indigo-400 hover:text-indigo-300">
+            <button onClick={() => { setPhase('idle'); setScanFiles([]); setCurrentPage(1); setImportingCount(0) }} className="text-sm text-indigo-400 hover:text-indigo-300">
               ← Scan another directory
             </button>
+          </div>
+        )}
+
+        {/* Importing progress (shown while the batch import API runs) */}
+        {phase === 'importing' && (
+          <div className="text-center py-16">
+            <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-gray-700 border-t-indigo-500" />
+            <div className="text-lg font-medium text-white">
+              Importing{importingCount > 0 ? ` ${importingCount} item${importingCount === 1 ? '' : 's'}` : ''}…
+            </div>
+            <div className="text-sm text-gray-500 mt-1">Updating your library. This may take a moment for larger batches.</div>
           </div>
         )}
 
         {/* Results — visible during scanning (progressive) and after scan completes */}
         {(phase === 'ready' || (phase === 'scanning' && scanFiles.length > 0)) && (
           <div className="space-y-8">
+            {/* Top pager (for long lists) */}
+            {needsPagination && (
+              <div className="flex items-center justify-center gap-2 text-sm -mb-4">
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >«</button>
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >← Prev</button>
+                <span className="text-gray-400 px-2 tabular-nums">Page {currentPage} / {totalPages}</span>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >Next →</button>
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >»</button>
+                <span className="text-[10px] text-gray-600 ml-2">({visibleShows.length + visibleMovies.length} items)</span>
+              </div>
+            )}
+
             {/* TV Shows */}
-            {visibleShows.length > 0 && (
+            {visibleShows.length > 0 && pagedShows.length > 0 && (
               <section>
                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
                   TV Shows
@@ -879,7 +1005,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                   {showUncertainOnly && <> — uncertain matches only</>}
                 </h2>
                 <div className="space-y-3">
-                  {visibleShows.map(show => (
+                  {pagedShows.map(show => (
                     <ShowCard
                       key={show.title}
                       show={show}
@@ -908,7 +1034,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
             )}
 
             {/* Movies */}
-            {visibleMovies.length > 0 && (
+            {visibleMovies.length > 0 && pagedMovies.length > 0 && (
               <section>
                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
                   Movies
@@ -916,7 +1042,7 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                   {showUncertainOnly && <> — uncertain matches only</>}
                 </h2>
                 <div className="space-y-1">
-                  {visibleMovies.map((movie, i) => (
+                  {pagedMovies.map((movie, i) => (
                     <MovieRow
                       key={i}
                       file={movie}
@@ -940,6 +1066,33 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
                   ))}
                 </div>
               </section>
+            )}
+
+            {/* Bottom pager */}
+            {needsPagination && (
+              <div className="flex items-center justify-center gap-2 text-sm pt-2">
+                <button
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >«</button>
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >← Prev</button>
+                <span className="text-gray-400 px-2 tabular-nums">Page {currentPage} / {totalPages}</span>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >Next →</button>
+                <button
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                  className="px-2 py-1 rounded bg-gray-800 disabled:opacity-50 hover:bg-gray-700 border border-gray-700"
+                >»</button>
+              </div>
             )}
 
             {showUncertainOnly && visibleShows.length === 0 && visibleMovies.length === 0 && (
@@ -967,6 +1120,18 @@ export default function ScanPage({ onClose, onUnauthorized }: Props) {
           </div>
         )}
       </div>
+
+      {/* Floating back to top for very long lists (50/100/5000+ items) */}
+      {showScrollTop && (
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="fixed bottom-5 right-5 z-[70] bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-200 rounded-full w-10 h-10 flex items-center justify-center shadow-xl text-lg"
+          title="Back to top"
+          aria-label="Back to top"
+        >
+          ↑
+        </button>
+      )}
     </div>
   )
 }

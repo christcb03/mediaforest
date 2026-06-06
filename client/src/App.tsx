@@ -130,9 +130,12 @@ export default function App() {
   useEffect(() => { search() }, [search])
 
   // Explicit refresh — used after import, scan, settings close, etc.
+  // Also refreshes the health count (titles in top bar) so post-import state is immediately visible.
   const loadSections = useCallback(async () => {
     if (!token) return
     try {
+      const h = await api.health().catch(() => null)
+      if (h) setHealth(h)
       const r = await api.getSections()
       setSections(r.sections)
       await fetchSectionResults(r.sections)
