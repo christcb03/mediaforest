@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # christcb03/phrasevault
+  IMAGE_NAME: ${{ github.repository }}   # e.g. christcb03/mediaforest
 
 jobs:
   build-and-push:
@@ -58,7 +58,7 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ MediaForest image pushed to GHCR
+            --data-urlencode "text=✅ ${{ github.repository }} image pushed to GHCR
           Commit: ${{ github.sha }} by ${{ github.actor }}
           Watchtower will deploy within 5 minutes."
 
@@ -69,6 +69,6 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=❌ MediaForest build FAILED
+            --data-urlencode "text=❌ ${{ github.repository }} build FAILED
           Commit: ${{ github.sha }} by ${{ github.actor }}
           Check: https://github.com/${{ github.repository }}/actions"
